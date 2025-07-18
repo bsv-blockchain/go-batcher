@@ -97,8 +97,8 @@ package main
 
 import (
     "fmt"
+	"time"
     "github.com/bsv-blockchain/go-batcher"
-    "time"
 )
 
 func main() {
