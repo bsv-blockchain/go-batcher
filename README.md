@@ -1,5 +1,5 @@
 # 🚀 go-batcher
-> From Zero to Go Hero: Pre-wired Template for Modern Libraries
+> High-performance batch processing for Go applications
 
 <table>
   <thead>
