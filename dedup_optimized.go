@@ -13,11 +13,11 @@ import (
 // This implementation uses a bit array and multiple hash functions to provide
 // probabilistic set membership testing with no false negatives.
 type BloomFilter struct {
-	bits       []uint64
-	size       uint64
-	hashFuncs  uint
-	itemCount  atomic.Uint64
-	mu         sync.RWMutex
+	bits      []uint64
+	size      uint64
+	hashFuncs uint
+	itemCount atomic.Uint64
+	mu        sync.RWMutex
 }
 
 // NewBloomFilter creates a new bloom filter with the specified size and hash functions.
@@ -31,37 +31,11 @@ func NewBloomFilter(size uint64, hashFuncs uint) *BloomFilter {
 	}
 }
 
-// hash generates multiple hash values for the given key.
-func (bf *BloomFilter) hash(key interface{}) []uint64 {
-	h := fnv.New64a()
-	// Convert key to bytes for hashing
-	switch k := key.(type) {
-	case string:
-		h.Write([]byte(k))
-	case int:
-		h.Write([]byte{byte(k >> 56), byte(k >> 48), byte(k >> 40), byte(k >> 32),
-			byte(k >> 24), byte(k >> 16), byte(k >> 8), byte(k)})
-	default:
-		// For other types, use a simple conversion
-		h.Write([]byte{1, 2, 3, 4, 5, 6, 7, 8})
-	}
-
-	hash1 := h.Sum64()
-	// Generate additional hashes using double hashing
-	hashes := make([]uint64, bf.hashFuncs)
-	hash2 := hash1 >> 32
-	for i := uint(0); i < bf.hashFuncs; i++ {
-		hashes[i] = (hash1 + uint64(i)*hash2) % bf.size
-	}
-	return hashes
-}
-
 // Add adds a key to the bloom filter.
 func (bf *BloomFilter) Add(key interface{}) {
 	hashes := bf.hash(key)
 	bf.mu.Lock()
 	defer bf.mu.Unlock()
-
 	for _, h := range hashes {
 		wordIndex := h / 64
 		bitIndex := h % 64
@@ -76,7 +50,6 @@ func (bf *BloomFilter) Test(key interface{}) bool {
 	hashes := bf.hash(key)
 	bf.mu.RLock()
 	defer bf.mu.RUnlock()
-
 	for _, h := range hashes {
 		wordIndex := h / 64
 		bitIndex := h % 64
@@ -91,16 +64,42 @@ func (bf *BloomFilter) Test(key interface{}) bool {
 func (bf *BloomFilter) Reset() {
 	bf.mu.Lock()
 	defer bf.mu.Unlock()
-
 	for i := range bf.bits {
 		bf.bits[i] = 0
 	}
 	bf.itemCount.Store(0)
 }
 
+// hash generates multiple hash values for the given key.
+func (bf *BloomFilter) hash(key interface{}) []uint64 {
+	h := fnv.New64a()
+	// Convert key to bytes for hashing
+	switch k := key.(type) {
+	case string:
+		_, _ = h.Write([]byte(k))
+	case int:
+		_, _ = h.Write([]byte{
+			byte(k >> 56), byte(k >> 48), byte(k >> 40), byte(k >> 32),
+			byte(k >> 24), byte(k >> 16), byte(k >> 8), byte(k),
+		})
+	default:
+		// For other types, use a simple conversion
+		_, _ = h.Write([]byte{1, 2, 3, 4, 5, 6, 7, 8})
+	}
+	hash1 := h.Sum64()
+	// Generate additional hashes using double hashing
+	hashes := make([]uint64, bf.hashFuncs)
+	hash2 := hash1 >> 32
+	for i := uint(0); i < bf.hashFuncs; i++ {
+		hashes[i] = (hash1 + uint64(i)*hash2) % bf.size
+	}
+	return hashes
+}
+
 // TimePartitionedMapOptimized extends TimePartitionedMap with optimized operations.
 type TimePartitionedMapOptimized[K comparable, V any] struct {
 	*TimePartitionedMap[K, V]
+
 	bloomFilter      *BloomFilter
 	bloomResetTicker *time.Ticker
 }
@@ -108,15 +107,13 @@ type TimePartitionedMapOptimized[K comparable, V any] struct {
 // NewTimePartitionedMapOptimized creates an optimized time-partitioned map with bloom filter.
 func NewTimePartitionedMapOptimized[K comparable, V any](bucketSize time.Duration, maxBuckets int) *TimePartitionedMapOptimized[K, V] {
 	base := NewTimePartitionedMap[K, V](bucketSize, maxBuckets)
-	
 	// Create bloom filter sized for expected items
 	// Assuming average of 10k items per bucket with 0.1% false positive rate
-	bloomSize := uint64(maxBuckets * 10000 * 10) // 10 bits per item
+	bloomSize := uint64(maxBuckets) * 10000 * 10 //nolint:gosec // Controlled input with reasonable bounds
 	m := &TimePartitionedMapOptimized[K, V]{
 		TimePartitionedMap: base,
 		bloomFilter:        NewBloomFilter(bloomSize, 3), // 3 hash functions
 	}
-
 	// Reset bloom filter periodically to handle expired items
 	m.bloomResetTicker = time.NewTicker(bucketSize * time.Duration(maxBuckets))
 	go func() {
@@ -126,7 +123,6 @@ func NewTimePartitionedMapOptimized[K comparable, V any](bucketSize time.Duratio
 			m.rebuildBloomFilter()
 		}
 	}()
-
 	return m
 }
 
@@ -134,7 +130,6 @@ func NewTimePartitionedMapOptimized[K comparable, V any](bucketSize time.Duratio
 func (m *TimePartitionedMapOptimized[K, V]) rebuildBloomFilter() {
 	m.bucketsMu.Lock()
 	defer m.bucketsMu.Unlock()
-
 	for _, bucket := range m.buckets.Range() {
 		for key := range bucket.Range() {
 			m.bloomFilter.Add(key)
@@ -149,16 +144,13 @@ func (m *TimePartitionedMapOptimized[K, V]) GetOptimized(key K) (V, bool) {
 	if !m.bloomFilter.Test(key) {
 		return m.zero, false
 	}
-
 	// Search from newest to oldest bucket
 	newestID := m.newestBucket.Load()
 	oldestID := m.oldestBucket.Load()
-
 	// If no buckets exist
 	if newestID == 0 || oldestID == 0 {
 		return m.zero, false
 	}
-
 	// Search backwards from newest bucket
 	for bucketID := newestID; bucketID >= oldestID; bucketID-- {
 		if bucket, exists := m.buckets.Get(bucketID); exists {
@@ -167,7 +159,6 @@ func (m *TimePartitionedMapOptimized[K, V]) GetOptimized(key K) (V, bool) {
 			}
 		}
 	}
-
 	return m.zero, false
 }
 
@@ -186,35 +177,26 @@ func (m *TimePartitionedMapOptimized[K, V]) SetOptimized(key K, value V) bool {
 		// Not actually a duplicate, add to bloom filter
 		m.bloomFilter.Add(key)
 	}
-
 	// Proceed with insertion (same as original Set logic)
 	var (
 		bucket *txmap.SyncedMap[K, V]
 		exists bool
 	)
-
 	bucketID := m.currentBucketID.Load()
-
 	m.bucketsMu.Lock()
-
 	if bucket, exists = m.buckets.Get(bucketID); !exists {
 		bucket = txmap.NewSyncedMap[K, V]()
 		m.buckets.Set(bucketID, bucket)
-
 		if m.newestBucket.Load() < bucketID {
 			m.newestBucket.Store(bucketID)
 		}
-
 		if m.oldestBucket.Load() == 0 || m.oldestBucket.Load() > bucketID {
 			m.oldestBucket.Store(bucketID)
 		}
 	}
-
 	bucket.Set(key, value)
 	m.itemCount.Add(1)
-
 	m.bucketsMu.Unlock()
-
 	return true
 }
 
@@ -225,18 +207,18 @@ func (m *TimePartitionedMapOptimized[K, V]) Close() {
 	}
 }
 
-// BatcherWithDedupOptimized extends BatcherWithDedup with optimized deduplication.
-type BatcherWithDedupOptimized[T comparable] struct {
+// WithDedupOptimized extends BatcherWithDedup with optimized deduplication.
+type WithDedupOptimized[T comparable] struct {
 	Batcher[T]
+
 	deduplicationWindow time.Duration
 	deduplicationMap    *TimePartitionedMapOptimized[T, struct{}]
 }
 
 // NewWithDeduplicationOptimized creates a new Batcher with optimized deduplication.
-func NewWithDeduplicationOptimized[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedupOptimized[T] {
+func NewWithDeduplicationOptimized[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *WithDedupOptimized[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
-
-	b := &BatcherWithDedupOptimized[T]{
+	b := &WithDedupOptimized[T]{
 		Batcher: Batcher[T]{
 			fn:         fn,
 			size:       size,
@@ -249,18 +231,15 @@ func NewWithDeduplicationOptimized[T comparable](size int, timeout time.Duration
 		deduplicationWindow: deduplicationWindow,
 		deduplicationMap:    NewTimePartitionedMapOptimized[T, struct{}](time.Second, int(deduplicationWindow.Seconds())+1),
 	}
-
 	go b.workerOptimized()
-
 	return b
 }
 
 // Put adds an item to the batch with optimized deduplication.
-func (b *BatcherWithDedupOptimized[T]) Put(item *T) {
+func (b *WithDedupOptimized[T]) Put(item *T) {
 	if item == nil {
 		return
 	}
-
 	// SetOptimized returns TRUE if the item was added, FALSE if it was a duplicate
 	if b.deduplicationMap.SetOptimized(*item, struct{}{}) {
 		// Add the item to the batch

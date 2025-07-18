@@ -80,8 +80,8 @@ func BenchmarkWorkerComparison(b *testing.B) {
 	}
 }
 
-// Benchmark comparison between basic Batcher and BatcherWithPool
-func BenchmarkBatcherWithPoolComparison(b *testing.B) {
+// Benchmark comparison between basic Batcher and WithPool
+func BenchmarkWithPoolComparison(b *testing.B) {
 	benchmarks := []struct {
 		name        string
 		constructor func(int, time.Duration, func([]*testItem), bool) interface{}
@@ -93,7 +93,7 @@ func BenchmarkBatcherWithPoolComparison(b *testing.B) {
 			},
 		},
 		{
-			"BatcherWithPool",
+			"WithPool",
 			func(size int, timeout time.Duration, fn func([]*testItem), bg bool) interface{} {
 				return NewWithPool[testItem](size, timeout, fn, bg)
 			},
@@ -115,7 +115,7 @@ func BenchmarkBatcherWithPoolComparison(b *testing.B) {
 				switch bt := batcher.(type) {
 				case *Batcher[testItem]:
 					bt.Put(&testItem{ID: i})
-				case *BatcherWithPool[testItem]:
+				case *WithPool[testItem]:
 					bt.Put(&testItem{ID: i})
 				}
 			}
@@ -248,7 +248,7 @@ func BenchmarkDeduplicationComparison(b *testing.B) {
 				switch bt := batcher.(type) {
 				case *BatcherWithDedup[testItem]:
 					bt.Put(item)
-				case *BatcherWithDedupOptimized[testItem]:
+				case *WithDedupOptimized[testItem]:
 					bt.Put(item)
 				}
 			}
@@ -285,7 +285,7 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 			},
 		},
 		{
-			"BatcherWithPool_Allocations",
+			"WithPool_Allocations",
 			func() {
 				processBatch := func([]*testItem) {}
 				batcher := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
@@ -312,18 +312,19 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 func BenchmarkSummary(b *testing.B) {
 	b.Skip("This is not a real benchmark, just a summary printer")
 
-	fmt.Println("\n=== BENCHMARK COMPARISON SUMMARY ===")
-	fmt.Println("Run benchmarks with: go test -bench=. -benchmem")
-	fmt.Println("\nExpected improvements:")
-	fmt.Println("- PutOptimized: 30-50% faster for non-blocking sends")
-	fmt.Println("- WorkerOptimized: 70-80% fewer allocations")
-	fmt.Println("- BatcherWithPool: 90% fewer allocations for batch slices")
-	fmt.Println("- GetOptimized: 40-60% faster for recent items")
-	fmt.Println("- SetOptimized: 20-40% faster for non-duplicates")
+	// Using b.Log instead of fmt.Println to comply with linter
+	b.Log("\n=== BENCHMARK COMPARISON SUMMARY ===")
+	b.Log("Run benchmarks with: go test -bench=. -benchmem")
+	b.Log("\nExpected improvements:")
+	b.Log("- PutOptimized: 30-50% faster for non-blocking sends")
+	b.Log("- WorkerOptimized: 70-80% fewer allocations")
+	b.Log("- WithPool: 90% fewer allocations for batch slices")
+	b.Log("- GetOptimized: 40-60% faster for recent items")
+	b.Log("- SetOptimized: 20-40% faster for non-duplicates")
 }
 
 // Benchmark for high concurrency scenarios
-func BenchmarkHighConcurrency(b *testing.B) {
+func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tests multiple scenarios
 	concurrencyLevels := []int{10, 100, 1000}
 
 	for _, level := range concurrencyLevels {

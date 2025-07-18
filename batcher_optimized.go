@@ -32,9 +32,7 @@ func NewOptimized[T any](size int, timeout time.Duration, fn func(batch []*T), b
 		triggerCh:  make(chan struct{}),
 		background: background,
 	}
-
 	go b.workerOptimized()
-
 	return b
 }
 
@@ -42,11 +40,10 @@ func NewOptimized[T any](size int, timeout time.Duration, fn func(batch []*T), b
 // Instead of creating a new timer for each batch cycle with time.After(), this
 // implementation creates a single timer and reuses it with Reset(). This reduces
 // allocations and garbage collection overhead.
-func (b *Batcher[T]) workerOptimized() {
+func (b *Batcher[T]) workerOptimized() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
 	// Create a reusable timer
 	timer := time.NewTimer(b.timeout)
 	defer timer.Stop()
-
 	for {
 		// Reset the timer for this batch cycle
 		if !timer.Stop() {
@@ -56,44 +53,37 @@ func (b *Batcher[T]) workerOptimized() {
 			}
 		}
 		timer.Reset(b.timeout)
-
 		for {
 			select {
 			case item := <-b.ch:
 				b.batch = append(b.batch, item)
-
 				if len(b.batch) == b.size {
 					goto saveBatch
 				}
-
 			case <-timer.C:
 				goto saveBatch
-
 			case <-b.triggerCh:
 				goto saveBatch
 			}
 		}
-
 	saveBatch:
 		if len(b.batch) > 0 {
 			batch := b.batch
-
 			if b.background {
 				go b.fn(batch)
 			} else {
 				b.fn(batch)
 			}
-
 			b.batch = make([]*T, 0, b.size)
 		}
 	}
 }
 
-// BatcherWithPool extends Batcher with slice pooling for reduced allocations.
+// WithPool extends Batcher with slice pooling for reduced allocations.
 // This implementation uses sync.Pool to reuse batch slices instead of allocating
 // new ones for each batch. This can significantly reduce memory allocations and
 // GC pressure in high-throughput scenarios.
-type BatcherWithPool[T any] struct {
+type WithPool[T any] struct {
 	fn         func([]*T)
 	size       int
 	timeout    time.Duration
@@ -104,11 +94,11 @@ type BatcherWithPool[T any] struct {
 	pool       *sync.Pool
 }
 
-// NewWithPool creates a new BatcherWithPool instance that uses sync.Pool for slice reuse.
+// NewWithPool creates a new WithPool instance that uses sync.Pool for slice reuse.
 // This constructor is similar to New() but initializes a sync.Pool for batch slices
 // and uses workerWithPool() which retrieves and returns slices from the pool.
-func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithPool[T] {
-	b := &BatcherWithPool[T]{
+func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *WithPool[T] {
+	b := &WithPool[T]{
 		fn:         fn,
 		size:       size,
 		timeout:    timeout,
@@ -123,30 +113,27 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 			},
 		},
 	}
-
 	go b.workerWithPool()
-
 	return b
 }
 
-// Put adds an item to the batch (method for BatcherWithPool).
-func (b *BatcherWithPool[T]) Put(item *T, _ ...int) {
+// Put adds an item to the batch (method for WithPool).
+func (b *WithPool[T]) Put(item *T, _ ...int) {
 	b.ch <- item
 }
 
-// Trigger forces immediate processing of the current batch (method for BatcherWithPool).
-func (b *BatcherWithPool[T]) Trigger() {
+// Trigger forces immediate processing of the current batch (method for WithPool).
+func (b *WithPool[T]) Trigger() {
 	b.triggerCh <- struct{}{}
 }
 
-// workerWithPool is the worker loop for BatcherWithPool that uses sync.Pool for slice reuse.
+// workerWithPool is the worker loop for WithPool that uses sync.Pool for slice reuse.
 // This implementation retrieves batch slices from the pool and returns them after use,
 // reducing the number of allocations needed for batch processing.
-func (b *BatcherWithPool[T]) workerWithPool() {
+func (b *WithPool[T]) workerWithPool() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
 	// Create a reusable timer (combining timer optimization with pool usage)
 	timer := time.NewTimer(b.timeout)
 	defer timer.Stop()
-
 	for {
 		// Reset the timer for this batch cycle
 		if !timer.Stop() {
@@ -156,28 +143,22 @@ func (b *BatcherWithPool[T]) workerWithPool() {
 			}
 		}
 		timer.Reset(b.timeout)
-
 		for {
 			select {
 			case item := <-b.ch:
 				b.batch = append(b.batch, item)
-
 				if len(b.batch) == b.size {
 					goto saveBatch
 				}
-
 			case <-timer.C:
 				goto saveBatch
-
 			case <-b.triggerCh:
 				goto saveBatch
 			}
 		}
-
 	saveBatch:
 		if len(b.batch) > 0 {
 			batch := b.batch
-
 			if b.background {
 				go func(batch []*T) {
 					b.fn(batch)
@@ -191,7 +172,6 @@ func (b *BatcherWithPool[T]) workerWithPool() {
 				slice := batch[:0]
 				b.pool.Put(&slice)
 			}
-
 			// Get a new slice from the pool
 			newBatchPtr := b.pool.Get().(*[]*T)
 			b.batch = *newBatchPtr
