@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"fmt"
 	"hash/fnv"
 	"sync"
 	"sync/atomic"
@@ -83,8 +84,8 @@ func (bf *BloomFilter) hash(key interface{}) []uint64 {
 			byte(k >> 24), byte(k >> 16), byte(k >> 8), byte(k),
 		})
 	default:
-		// For other types, use a simple conversion
-		_, _ = h.Write([]byte{1, 2, 3, 4, 5, 6, 7, 8})
+		// For other types, use fmt.Fprintf for generic conversion
+		_, _ = fmt.Fprintf(h, "%v", key)
 	}
 	hash1 := h.Sum64()
 	// Generate additional hashes using double hashing
