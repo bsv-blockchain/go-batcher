@@ -127,7 +127,7 @@ func main() {
 
 ### Why You'll Love This Batcher
 
-* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 153 ns/op)
+* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 145 ns/op)
 * **🧠 Smart Batching** – Auto-groups by size or time interval, whichever comes first
 * **🔁 Built-in Deduplication** – Optional dedup ensures each item is processed only once
 * **🛡️ Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
@@ -379,9 +379,9 @@ make bench
 
 | Benchmark                                                                            | Description                      |   ns/op |  B/op | allocs/op |
 |--------------------------------------------------------------------------------------|----------------------------------|--------:|------:|----------:|
-| [BenchmarkBatcherPut](batcher_comprehensive_benchmark_test.go)                       | Basic Put operation              |   153.3 |    64 |         0 |
-| [BenchmarkBatcherPutParallel](batcher_comprehensive_benchmark_test.go)               | Concurrent Put operations        |   499.0 |   186 |         2 |
-| [BenchmarkBatcherTrigger](batcher_comprehensive_benchmark_test.go)                   | Manual batch trigger             |   477.1 |   420 |         5 |
+| [BenchmarkBatcherPut](batcher_comprehensive_benchmark_test.go)                       | Basic Put operation              |   145.2 |    11 |         0 |
+| [BenchmarkBatcherPutParallel](batcher_comprehensive_benchmark_test.go)               | Concurrent Put operations        |   308.1 |    11 |         0 |
+| [BenchmarkBatcherTrigger](batcher_comprehensive_benchmark_test.go)                   | Manual batch trigger             |   466.2 |   248 |         3 |
 | [BenchmarkBatcherWithBackground/Foreground](batcher_comprehensive_benchmark_test.go) | Foreground processing            |   146.0 |    61 |         0 |
 | [BenchmarkTimePartitionedMapSet](batcher_comprehensive_benchmark_test.go)            | Map Set operation                |   248.0 |   301 |         2 |
 | [BenchmarkTimePartitionedMapGet](batcher_comprehensive_benchmark_test.go)            | Map Get operation                |   169.2 |   236 |         2 |
