@@ -341,14 +341,14 @@ func FuzzBatcherWithDedup(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz test
 	})
 }
 
-// FuzzTimePartitionedMapConcurrent tests concurrent operations on TimePartitionedMap.
+// FuzzConcurrentTimePartitionedMap tests concurrent operations on TimePartitionedMap.
 //
 // This fuzz test verifies:
 // - Thread safety under high concurrency
 // - No data races
 // - Operations complete without panic
 // - Basic correctness under a concurrent load
-func FuzzTimePartitionedMapConcurrent(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz tests require complex logic
+func FuzzConcurrentTimePartitionedMap(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz tests require complex logic
 	// Add seed corpus
 	f.Add(10, 100, 50) // goroutines, operations per goroutine, key range
 	f.Add(50, 20, 10)  // high concurrency, few operations
