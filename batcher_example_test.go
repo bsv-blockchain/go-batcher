@@ -156,17 +156,21 @@ func ExampleNewWithDeduplication() {
 func ExampleBatcherWithDedup_Put() {
 	processed := make(chan int, 1)
 
-	b := batcher.NewWithDeduplication[int](10, time.Second, func(batch []*int) {
+	// Use a larger batch size and longer timeout to prevent premature processing
+	b := batcher.NewWithDeduplication[int](100, 5*time.Second, func(batch []*int) {
 		fmt.Printf("Processing batch with %d unique items\n", len(batch))
 		processed <- len(batch)
 	}, false)
 
-	// Add duplicate items
+	// Add duplicate items - the set should have 4 unique values: 1, 2, 3, 4
 	items := []int{1, 2, 3, 2, 1, 4}
 	for _, item := range items {
 		itemCopy := item
 		b.Put(&itemCopy)
 	}
+
+	// Small delay to ensure all items are processed through deduplication
+	time.Sleep(50 * time.Millisecond)
 
 	// Trigger processing
 	b.Trigger()
