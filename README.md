@@ -127,14 +127,14 @@ func main() {
 
 ### Why You'll Love This Batcher
 
-* **⚡ Blazing Performance** – Process millions of items with minimal overhead (see our [benchmarks](#benchmark-results): 153 ns per operation!)
-* **🧠 Smart Batching** – Automatically groups items by size or time interval, whichever comes first
-* **🔁 Built-in Deduplication** – Optional deduplication ensures each unique item is processed only once per batch
-* **🛡️ Thread-Safe by Design** – Concurrent-safe operations let you Put() from multiple goroutines without worry
-* **⏱️ Time-Partitioned Storage** – Advanced time-based partitioning for efficient memory usage and automatic cleanup
-* **🎯 Zero Dependencies** – Pure Go implementation with no external runtime dependencies
-* **🔧 Flexible Configuration** – Customize batch sizes, intervals, processors, and error handlers to fit your needs
-* **📊 Production-Ready** – Battle-tested with comprehensive test coverage, benchmarks, and fuzz testing
+* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 153 ns/op)
+* **🧠 Smart Batching** – Auto-groups by size or time interval, whichever comes first
+* **🔁 Built-in Deduplication** – Optional dedup ensures each item is processed only once
+* **🛡️ Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
+* **⏱️ Time-Partitioned Storage** – Efficient memory usage with automatic cleanup
+* **🎯 Zero Dependencies** – Pure Go with no external runtime dependencies
+* **🔧 Flexible Configuration** – Customize batch sizes, intervals, and processors
+* **📊 Production-Ready** – Battle-tested with full test coverage and benchmarks
 
 Perfect for high-throughput scenarios like log aggregation, metrics collection, event processing, or any situation where you need to efficiently batch operations for downstream systems.
 
