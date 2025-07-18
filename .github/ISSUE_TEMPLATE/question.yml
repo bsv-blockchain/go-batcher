@@ -3,8 +3,7 @@ description: General template for asking a question related to this project
 title: "[Question] <your topic here>"
 labels: ["question"]
 assignees:
-  - galt-tr
-  - mrz1836
+  - icellan
 body:
   - type: textarea
     id: question

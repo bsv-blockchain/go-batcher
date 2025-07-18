@@ -88,6 +88,11 @@ LOC_GO := $(shell find . -name '*.go' ! -name '*_test.go' \
 ## DATE is the current date in YYYY-MM-DD format
 DATE     := $(shell date +%Y-%m-%d)
 
+.PHONY: lint-yaml
+lint-yaml: ## Format YAML files with prettier
+	@echo "Formatting YAML files..."
+	@npx prettier "**/*.{yml,yaml}" --write --config .github/.prettierrc.yml --ignore-path .github/.prettierignore
+
 .PHONY: loc
 loc: ## Total lines of code table
 	@echo "| Type       | Total Lines | Date        |"
