@@ -255,14 +255,15 @@ func (m *TimePartitionedMap[K, V]) Set(key K, value V) bool {
 func (m *TimePartitionedMap[K, V]) Delete(key K) bool {
 	deleted := false
 
+	m.bucketsMu.Lock()
+	defer m.bucketsMu.Unlock()
+
 	// Check all buckets
 	bucketMap := m.buckets.Range()
 	for bucketID, bucket := range bucketMap {
 		if _, found := bucket.Get(key); found {
 			bucket.Delete(key)
-
 			deleted = true
-
 			m.itemCount.Add(-1)
 
 			// If the bucket is empty, remove it

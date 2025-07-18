@@ -335,8 +335,17 @@ func FuzzBatcherWithDedup(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz test
 		actualUnique := len(uniqueSeen)
 		mu.Unlock()
 
-		if actualUnique != uniqueItems {
-			t.Errorf("Expected %d unique items, got %d", uniqueItems, actualUnique)
+		// When totalItems is 0, we expect 0 unique items regardless of uniqueItems value
+		expectedUnique := uniqueItems
+		if totalItems == 0 {
+			expectedUnique = 0
+		} else if totalItems < uniqueItems {
+			// If we have fewer total items than unique items, we can only have totalItems unique
+			expectedUnique = totalItems
+		}
+
+		if actualUnique != expectedUnique {
+			t.Errorf("Expected %d unique items, got %d", expectedUnique, actualUnique)
 		}
 	})
 }
