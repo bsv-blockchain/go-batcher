@@ -62,7 +62,7 @@ func (ep *EventProcessor) ProcessBatch(events []*UserEvent) {
 	defer ep.mu.Unlock()
 
 	// Simulate processing time (e.g., network latency, database write)
-	// In reality, batch processing is usually much faster per-item than individual operations
+	// In reality; batch processing is usually much faster per-item than individual operations
 	processingTime := time.Duration(len(events)*10) * time.Millisecond
 	time.Sleep(processingTime)
 
@@ -125,8 +125,8 @@ func startEventGenerator(ctx context.Context, wg *sync.WaitGroup, batcher *batch
 // startBurstGenerator simulates burst traffic patterns.
 // This represents scenarios where many events arrive simultaneously:
 // - Flash sales or marketing campaigns
-// - System startup where many components initialize at once
-// - Scheduled batch jobs that generate many events
+// - System startup where many components initialize on once
+// - Scheduled batch the jobs that generate many events
 // - Traffic spikes from viral content
 func startBurstGenerator(ctx context.Context, wg *sync.WaitGroup, batcher *batcher.Batcher[UserEvent]) {
 	wg.Add(1)
