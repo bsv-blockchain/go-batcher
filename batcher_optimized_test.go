@@ -392,22 +392,78 @@ func TestBloomFilterExtended(t *testing.T) { //nolint:gocognit,gocyclo // Test r
 			ID   int
 			Name string
 		}
-		bf.Add("string")
-		bf.Add(42)
-		bf.Add(3.14)
-		bf.Add(customStruct{ID: 1, Name: "test"})
-		bf.Add([]byte("bytes"))
 
-		// All should return true (even if using default hash)
+		// Add all supported types
+		bf.Add("string")
+		bf.Add(int(42))
+		bf.Add(int8(8))
+		bf.Add(int16(16))
+		bf.Add(int32(32))
+		bf.Add(int64(64))
+		bf.Add(uint(42))
+		bf.Add(uint8(8))
+		bf.Add(uint16(16))
+		bf.Add(uint32(32))
+		bf.Add(uint64(64))
+		bf.Add(float32(3.14))
+		bf.Add(float64(3.14159))
+		bf.Add(true)
+		bf.Add(false)
+		bf.Add(customStruct{ID: 1, Name: "test"})
+
+		// Test all types are found
 		if !bf.Test("string") {
 			t.Error("Should find string")
 		}
-		if !bf.Test(42) {
+		if !bf.Test(int(42)) {
 			t.Error("Should find int")
 		}
-		// Other types will use default hash but should still work
-		if !bf.Test(3.14) {
-			t.Log("Float used default hash")
+		if !bf.Test(int8(8)) {
+			t.Error("Should find int8")
+		}
+		if !bf.Test(int16(16)) {
+			t.Error("Should find int16")
+		}
+		if !bf.Test(int32(32)) {
+			t.Error("Should find int32")
+		}
+		if !bf.Test(int64(64)) {
+			t.Error("Should find int64")
+		}
+		if !bf.Test(uint(42)) {
+			t.Error("Should find uint")
+		}
+		if !bf.Test(uint8(8)) {
+			t.Error("Should find uint8")
+		}
+		if !bf.Test(uint16(16)) {
+			t.Error("Should find uint16")
+		}
+		if !bf.Test(uint32(32)) {
+			t.Error("Should find uint32")
+		}
+		if !bf.Test(uint64(64)) {
+			t.Error("Should find uint64")
+		}
+		if !bf.Test(float32(3.14)) {
+			t.Error("Should find float32")
+		}
+		if !bf.Test(float64(3.14159)) {
+			t.Error("Should find float64")
+		}
+		if !bf.Test(true) {
+			t.Error("Should find bool true")
+		}
+		if !bf.Test(false) {
+			t.Error("Should find bool false")
+		}
+		if !bf.Test(customStruct{ID: 1, Name: "test"}) {
+			t.Error("Should find struct using default hash")
+		}
+
+		// Test that different values don't collide
+		if bf.Test(int(43)) && bf.Test(int(44)) && bf.Test(int(45)) {
+			t.Log("Some false positives expected with bloom filter")
 		}
 	})
 
@@ -1025,6 +1081,132 @@ func BenchmarkTimePartitionedMapOptimized(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			m.SetOptimized(i%1000, fmt.Sprintf("value_%d", i))
+		}
+	})
+}
+
+// TestBloomFilterDifferentTypesDeduplication tests deduplication with various types.
+func TestBloomFilterDifferentTypesDeduplication(t *testing.T) { //nolint:gocognit // Test requires type cases
+	// Test deduplication with int
+	t.Run("IntDeduplication", func(t *testing.T) {
+		itemCount := atomic.Int32{}
+		processBatch := func(batch []*int) {
+			itemCount.Add(int32(len(batch))) //nolint:gosec // Test code with controlled input
+		}
+		batcher := NewWithDeduplicationOptimized[int](10, 50*time.Millisecond, processBatch, false)
+
+		// Add duplicates
+		for i := 0; i < 20; i++ {
+			val := i % 5 // Only 5 unique values
+			batcher.Put(&val)
+		}
+
+		// Wait for processing
+		time.Sleep(100 * time.Millisecond)
+
+		if itemCount.Load() != 5 {
+			t.Errorf("Expected 5 unique items, got %d", itemCount.Load())
+		}
+	})
+
+	// Test deduplication with string
+	t.Run("StringDeduplication", func(t *testing.T) {
+		itemCount := atomic.Int32{}
+		processBatch := func(batch []*string) {
+			itemCount.Add(int32(len(batch))) //nolint:gosec // Test code with controlled input
+		}
+		batcher := NewWithDeduplicationOptimized[string](10, 50*time.Millisecond, processBatch, false)
+
+		// Add duplicates
+		values := []string{"apple", "banana", "cherry", "apple", "banana", "apple"}
+		for _, v := range values {
+			val := v // Copy for pointer
+			batcher.Put(&val)
+		}
+
+		// Wait for processing
+		time.Sleep(100 * time.Millisecond)
+
+		if itemCount.Load() != 3 {
+			t.Errorf("Expected 3 unique items, got %d", itemCount.Load())
+		}
+	})
+
+	// Test deduplication with bool
+	t.Run("BoolDeduplication", func(t *testing.T) {
+		itemCount := atomic.Int32{}
+		processBatch := func(batch []*bool) {
+			itemCount.Add(int32(len(batch))) //nolint:gosec // Test code with controlled input
+		}
+		batcher := NewWithDeduplicationOptimized[bool](10, 50*time.Millisecond, processBatch, false)
+
+		// Add duplicates
+		values := []bool{true, false, true, false, true, true, false}
+		for _, v := range values {
+			val := v // Copy for pointer
+			batcher.Put(&val)
+		}
+
+		// Wait for processing
+		time.Sleep(100 * time.Millisecond)
+
+		if itemCount.Load() != 2 {
+			t.Errorf("Expected 2 unique items (true/false), got %d", itemCount.Load())
+		}
+	})
+}
+
+// BenchmarkBloomFilterTypes benchmarks bloom filter performance with different types.
+func BenchmarkBloomFilterTypes(b *testing.B) { //nolint:gocognit // Multiple benchmark sub-tests
+	b.Run("String", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(fmt.Sprintf("key_%d", i))
+		}
+	})
+
+	b.Run("Int", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(i)
+		}
+	})
+
+	b.Run("Uint64", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(uint64(i)) //nolint:gosec // Test code with bounded loop
+		}
+	})
+
+	b.Run("Float64", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(float64(i) * 1.1)
+		}
+	})
+
+	b.Run("Bool", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(i%2 == 0)
+		}
+	})
+
+	b.Run("StructDefault", func(b *testing.B) {
+		bf := NewBloomFilter(100000, 3)
+		type testStruct struct {
+			ID   int
+			Name string
+		}
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			bf.Add(testStruct{ID: i, Name: fmt.Sprintf("item_%d", i)})
 		}
 	})
 }

@@ -1,8 +1,10 @@
 package batcher
 
 import (
+	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -72,19 +74,64 @@ func (bf *BloomFilter) Reset() {
 }
 
 // hash generates multiple hash values for the given key.
-func (bf *BloomFilter) hash(key interface{}) []uint64 {
+func (bf *BloomFilter) hash(key interface{}) []uint64 { //nolint:gocyclo // Type switch for performance
 	h := fnv.New64a()
-	// Convert key to bytes for hashing
+	// Convert key to bytes for hashing - optimized paths for common types
 	switch k := key.(type) {
 	case string:
 		_, _ = h.Write([]byte(k))
 	case int:
-		_, _ = h.Write([]byte{
-			byte(k >> 56), byte(k >> 48), byte(k >> 40), byte(k >> 32),
-			byte(k >> 24), byte(k >> 16), byte(k >> 8), byte(k),
-		})
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(k)) //nolint:gosec // Safe conversion for hashing
+		_, _ = h.Write(buf[:])
+	case int8:
+		_, _ = h.Write([]byte{byte(k)})
+	case int16:
+		var buf [2]byte
+		binary.BigEndian.PutUint16(buf[:], uint16(k)) //nolint:gosec // Safe conversion for hashing
+		_, _ = h.Write(buf[:])
+	case int32:
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], uint32(k)) //nolint:gosec // Safe conversion for hashing
+		_, _ = h.Write(buf[:])
+	case int64:
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(k)) //nolint:gosec // Safe conversion for hashing
+		_, _ = h.Write(buf[:])
+	case uint:
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(k))
+		_, _ = h.Write(buf[:])
+	case uint8:
+		_, _ = h.Write([]byte{k})
+	case uint16:
+		var buf [2]byte
+		binary.BigEndian.PutUint16(buf[:], k)
+		_, _ = h.Write(buf[:])
+	case uint32:
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], k)
+		_, _ = h.Write(buf[:])
+	case uint64:
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], k)
+		_, _ = h.Write(buf[:])
+	case float32:
+		var buf [4]byte
+		binary.BigEndian.PutUint32(buf[:], math.Float32bits(k))
+		_, _ = h.Write(buf[:])
+	case float64:
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], math.Float64bits(k))
+		_, _ = h.Write(buf[:])
+	case bool:
+		if k {
+			_, _ = h.Write([]byte{1})
+		} else {
+			_, _ = h.Write([]byte{0})
+		}
 	default:
-		// For other types, use fmt.Fprintf for generic conversion
+		// For other types (structs, arrays, etc), use fmt.Fprintf for generic conversion
 		_, _ = fmt.Fprintf(h, "%v", key)
 	}
 	hash1 := h.Sum64()
