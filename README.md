@@ -97,30 +97,55 @@ package main
 
 import (
     "fmt"
-	"time"
+    "time"
     "github.com/bsv-blockchain/go-batcher"
 )
 
 func main() {
     // Create a batcher that processes items every 100ms or when batch size hits 1000
     b := batcher.New[string](
-        batcher.WithBatchSize[string](1000),
-        batcher.WithInterval[string](100 * time.Millisecond),
-        batcher.WithProcessor[string](func(batch []string) error {
+        1000,                                        // batch size
+        100*time.Millisecond,                        // timeout interval
+        func(batch []*string) {                      // processor function
             fmt.Printf("⚡ Processing %d items in one go!\n", len(batch))
             // Your batch processing logic here
-            return nil
-        }),
+            for _, item := range batch {
+                fmt.Printf("Processing: %s\n", *item)
+            }
+        },
+        true, // background processing
     )
     
     // Feed items - they'll be intelligently batched
     for i := 0; i < 5000; i++ {
-        b.Put(fmt.Sprintf("item-%d", i))
+        item := fmt.Sprintf("item-%d", i)
+        b.Put(&item)
     }
     
-    // Gracefully shutdown when done
-    b.Stop()
+    // Process any remaining items before shutdown
+    b.Trigger()
+    // Note: The batcher worker runs indefinitely - use context cancellation for cleanup
 }
+```
+
+<br/>
+
+### Constructor Variants
+
+The `go-batcher` library provides several constructor options to fit different use cases:
+
+```go
+// Basic batcher - simple batching with size and timeout triggers
+b := batcher.New[string](100, time.Second, processFn, true)
+
+// With slice pooling - reduces memory allocations for high-throughput scenarios
+b := batcher.NewWithPool[string](100, time.Second, processFn, true)
+
+// With automatic deduplication - filters duplicate items within a 1-minute window
+b := batcher.NewWithDeduplication[string](100, time.Second, processFn, true)
+
+// Combined pooling and deduplication - maximum performance with duplicate filtering
+b := batcher.NewWithDeduplicationAndPool[string](100, time.Second, processFn, true)
 ```
 
 <br/>
@@ -129,11 +154,12 @@ func main() {
 
 * **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
 * **🧠 Smart Batching** – Auto-groups by size or time interval, whichever comes first
-* **🔁 Built-in Deduplication** – Optional dedup ensures each item is processed only once
+* **🔁 Optional Deduplication** – Built-in dedup variant ensures each item is processed only once within a time window
+* **🏊 Memory Pool Optimization** – Optional slice pooling reduces GC pressure in high-throughput scenarios
 * **🛡️ Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
-* **⏱️ Time-Partitioned Storage** – Efficient memory usage with automatic cleanup
-* **🎯 Zero Dependencies** – Pure Go with no external runtime dependencies
-* **🔧 Flexible Configuration** – Customize batch sizes, intervals, and processors
+* **⏱️ Time-Partitioned Storage** – Efficient memory usage with automatic cleanup (dedup variant)
+* **🎯 Minimal Dependencies** – Pure Go with only essential external dependencies
+* **🔧 Flexible Configuration** – Multiple constructor variants for different use cases
 * **📊 Production-Ready** – Battle-tested with full test coverage and benchmarks
 
 Perfect for high-throughput scenarios like log aggregation, metrics collection, event processing, or any situation where you need to efficiently batch operations for downstream systems.
