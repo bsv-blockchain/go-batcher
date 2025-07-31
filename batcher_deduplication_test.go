@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const initialSetShouldSucceedMsg = "Initial set should succeed"
+
 // Test item that implements comparable
 type testItem struct {
 	ID int
@@ -748,7 +750,7 @@ func TestTimePartitionedMapBoundaryConditions(t *testing.T) { //nolint:gocognit 
 
 			// Add initial items
 			setOK := m.Set(1, "value1")
-			require.True(t, setOK, "Initial set should succeed")
+			require.True(t, setOK, initialSetShouldSucceedMsg)
 			setOK = m.Set(2, "value2")
 			require.True(t, setOK, "Second initial set should succeed")
 
@@ -1000,7 +1002,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 
 			// First set the key
 			setOK := m.Set(key, 42)
-			require.True(t, setOK, "Initial set should succeed")
+			require.True(t, setOK, initialSetShouldSucceedMsg)
 
 			numGoroutines := 10
 			var wg sync.WaitGroup
@@ -1077,7 +1079,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 			// Pre-populate with some data
 			for i := 0; i < 10; i++ {
 				setOK := m.Set("initial"+string(rune(i)), true)
-				require.True(t, setOK, "Initial set should succeed")
+				require.True(t, setOK, initialSetShouldSucceedMsg)
 			}
 
 			// Wait for bucket to be close to expiration
