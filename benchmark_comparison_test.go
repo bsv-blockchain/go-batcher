@@ -20,7 +20,9 @@ func BenchmarkPutComparison(b *testing.B) {
 
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
-			processBatch := func([]*testItem) {}
+			processBatch := func([]*testItem) {
+				// Empty function: benchmark measures batcher performance, not processing
+			}
 			var batcher *Batcher[testItem]
 			if bm.name == "PutWithPool" {
 				batcher = NewWithPool[testItem](100, 100*time.Millisecond, processBatch, true)
@@ -237,7 +239,9 @@ func BenchmarkDeduplicationComparison(b *testing.B) {
 	// Test with 50% duplicates
 	for _, bm := range benchmarks {
 		b.Run(bm.name+"_50PercentDuplicates", func(b *testing.B) {
-			processBatch := func([]*testItem) {}
+			processBatch := func([]*testItem) {
+				// Empty function: benchmark measures deduplication performance, not processing
+			}
 			batcher := bm.constructor(100, 50*time.Millisecond, processBatch, true)
 
 			b.ResetTimer()
@@ -268,7 +272,9 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 		{
 			"Batcher_Allocations",
 			func() {
-				processBatch := func([]*testItem) {}
+				processBatch := func([]*testItem) {
+					// Empty function: benchmark measures memory allocations, not processing
+				}
 				batcher := New[testItem](100, 50*time.Millisecond, processBatch, true)
 				for i := 0; i < 1000; i++ {
 					batcher.Put(&testItem{ID: i})
@@ -279,7 +285,9 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 		{
 			"BatcherWithPool_Allocations",
 			func() {
-				processBatch := func([]*testItem) {}
+				processBatch := func([]*testItem) {
+					// Empty function: benchmark measures memory allocations, not processing
+				}
 				batcher := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
 				for i := 0; i < 1000; i++ {
 					batcher.Put(&testItem{ID: i})
@@ -290,7 +298,9 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 		{
 			"WithPool_Allocations",
 			func() {
-				processBatch := func([]*testItem) {}
+				processBatch := func([]*testItem) {
+					// Empty function: benchmark measures memory allocations, not processing
+				}
 				batcher := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
 				for i := 0; i < 1000; i++ {
 					batcher.Put(&testItem{ID: i})
@@ -332,7 +342,9 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 
 	for _, level := range concurrencyLevels {
 		b.Run(fmt.Sprintf("Batcher_%d_goroutines", level), func(b *testing.B) {
-			processBatch := func([]*testItem) {}
+			processBatch := func([]*testItem) {
+				// Empty function: benchmark measures concurrency performance, not processing
+			}
 			batcher := New[testItem](100, 10*time.Millisecond, processBatch, true)
 
 			b.ResetTimer()
@@ -352,7 +364,9 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 		})
 
 		b.Run(fmt.Sprintf("BatcherWithPool_%d_goroutines", level), func(b *testing.B) {
-			processBatch := func([]*testItem) {}
+			processBatch := func([]*testItem) {
+				// Empty function: benchmark measures concurrency performance, not processing
+			}
 			batcher := NewWithPool[testItem](100, 10*time.Millisecond, processBatch, true)
 
 			b.ResetTimer()
