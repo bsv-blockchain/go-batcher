@@ -34,6 +34,7 @@
 package batcher
 
 import (
+	"sync"
 	"time"
 )
 
@@ -55,6 +56,8 @@ import (
 // - ch: Buffered channel for receiving items to batch
 // - triggerCh: Channel for manual batch processing triggers
 // - background: If true, batch processing happens in a separate goroutine
+// - usePool: If true, uses sync.Pool for slice reuse to reduce allocations
+// - pool: Optional sync.Pool for reusing batch slices
 //
 // Notes:
 // - The Batcher is thread-safe and can be used concurrently
@@ -68,6 +71,8 @@ type Batcher[T any] struct {
 	ch         chan *T
 	triggerCh  chan struct{}
 	background bool
+	usePool    bool
+	pool       *sync.Pool
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -104,6 +109,7 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 		ch:         make(chan *T, size*64),
 		triggerCh:  make(chan struct{}),
 		background: background,
+		usePool:    false,
 	}
 
 	go b.worker()
@@ -111,11 +117,48 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 	return b
 }
 
-// Put adds an item to the batch for processing.
+// NewWithPool creates a new Batcher instance with slice pooling enabled.
+//
+// This constructor is similar to New() but initializes a sync.Pool for batch slices
+// and uses worker logic that retrieves and returns slices from the pool.
+// This can significantly reduce memory allocations and GC pressure in high-throughput scenarios.
+//
+// Parameters:
+//   - size: Maximum number of items per batch
+//   - timeout: Maximum duration to wait before processing an incomplete batch
+//   - fn: Callback function that processes each batch
+//   - background: If true, batch processing happens asynchronously
+//
+// Returns:
+// - *Batcher[T]: A configured and running Batcher instance with pooling enabled
+func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
+	b := &Batcher[T]{
+		fn:         fn,
+		size:       size,
+		timeout:    timeout,
+		batch:      make([]*T, 0, size),
+		ch:         make(chan *T, size*64),
+		triggerCh:  make(chan struct{}),
+		background: background,
+		usePool:    true,
+		pool: &sync.Pool{
+			New: func() interface{} {
+				slice := make([]*T, 0, size)
+				return &slice
+			},
+		},
+	}
+
+	go b.worker()
+
+	return b
+}
+
+// Put adds an item to the batch for processing using non-blocking channel send when possible.
 //
 // This method sends the item to the internal batching channel where it will be collected
-// by the worker goroutine. The item will be included in the next batch that is processed,
-// which occurs when the batch size is reached; the timeout expires, or Trigger() is called.
+// by the worker goroutine. It attempts a non-blocking send first, falling back to blocking
+// only when the channel is full. This reduces goroutine blocking in high-throughput scenarios.
 //
 // Parameters:
 // - item: Pointer to the item to be batched. Must not be nil
@@ -129,11 +172,18 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 // - May trigger batch processing if this item completes a full batch
 //
 // Notes:
-// - This method will block if the internal channel buffer is full (64x batch size)
+// - Uses fast-path non-blocking send when possible
+// - Falls back to blocking send only when channel is full
 // - Items are processed in the order they are received
 // - The variadic parameter exists for interface compatibility but is not used
 func (b *Batcher[T]) Put(item *T, _ ...int) { // Payload size is not used in this implementation
-	b.ch <- item
+	select {
+	case b.ch <- item:
+		// Fast path - non-blocking send succeeded
+	default:
+		// Channel is full, fallback to blocking send
+		b.ch <- item
+	}
 }
 
 // Trigger forces immediate processing of the current batch.
@@ -165,17 +215,17 @@ func (b *Batcher[T]) Trigger() {
 //
 // This function runs as a background goroutine and continuously monitors three conditions
 // for batch processing: size limit reached, timeout expired, or manual trigger received.
-// It uses a nested loop structure with goto statements for efficient batch processing.
+// It uses timer reuse and slice pooling when enabled.
 //
 // This function performs the following steps:
-// - Creates a new timeout timer for each batch cycle
+// - Creates a reusable timeout timer (optimization over time.After)
 // - Monitors three channels simultaneously using select:
 //   - Item channel: Receives new items to add to the current batch
 //   - Timeout channel: Fires when the timeout duration expires
 //   - Trigger channel: Receives manual trigger signals
 //
 // - Processes the batch when any trigger condition is met
-// - Resets the batch and starts a new cycle
+// - Resets the batch and starts a new cycle with efficient slice management
 //
 // Parameters:
 // - None (operates on Batcher receiver fields)
@@ -187,16 +237,28 @@ func (b *Batcher[T]) Trigger() {
 // - Consumes items from the internal channels
 // - Invokes the batch processing function (fn) with completed batches
 // - May spawn new goroutines if background processing is enabled
+// - Uses slice pooling if enabled to reduce allocations
 //
 // Notes:
 // - This function runs indefinitely and cannot be stopped
 // - Uses goto for performance optimization to avoid deep nesting
 // - Empty batches are not processed (checked before invoking fn)
-// - The batch slice is reallocated after each processing to avoid memory issues
-// - When background=true, batch processing is non-blocking and concurrent
-func (b *Batcher[T]) worker() { //nolint:gocognit // Worker function handles multiple channels and conditions
+// - Reuses timers to reduce allocations and GC pressure
+// - When usePool=true, manages slice lifecycle through sync.Pool for memory efficiency
+func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
+	// Create a reusable timer for optimization
+	timer := time.NewTimer(b.timeout)
+	defer timer.Stop()
+
 	for {
-		expire := time.After(b.timeout)
+		// Reset the timer for this batch cycle
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(b.timeout)
 
 		for {
 			select {
@@ -207,7 +269,7 @@ func (b *Batcher[T]) worker() { //nolint:gocognit // Worker function handles mul
 					goto saveBatch
 				}
 
-			case <-expire:
+			case <-timer.C:
 				goto saveBatch
 
 			case <-b.triggerCh:
@@ -216,16 +278,36 @@ func (b *Batcher[T]) worker() { //nolint:gocognit // Worker function handles mul
 		}
 
 	saveBatch:
-		if len(b.batch) > 0 {
+		if len(b.batch) > 0 { //nolint:nestif // Necessary complexity for handling pooling and background modes
 			batch := b.batch
 
 			if b.background {
-				go b.fn(batch)
+				if b.usePool {
+					go func(batch []*T) {
+						b.fn(batch)
+						// Return the slice to the pool after processing
+						slice := batch[:0]
+						b.pool.Put(&slice)
+					}(batch)
+				} else {
+					go b.fn(batch)
+				}
 			} else {
 				b.fn(batch)
+				if b.usePool {
+					// Return the slice to the pool after processing
+					slice := batch[:0]
+					b.pool.Put(&slice)
+				}
 			}
 
-			b.batch = make([]*T, 0, b.size)
+			// Get a new slice (from pool if enabled, or allocate new)
+			if b.usePool {
+				newBatchPtr := b.pool.Get().(*[]*T)
+				b.batch = *newBatchPtr
+			} else {
+				b.batch = make([]*T, 0, b.size)
+			}
 		}
 	}
 }

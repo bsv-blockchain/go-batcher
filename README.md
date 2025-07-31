@@ -127,7 +127,7 @@ func main() {
 
 ### Why You'll Love This Batcher
 
-* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 145 ns/op)
+* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
 * **🧠 Smart Batching** – Auto-groups by size or time interval, whichever comes first
 * **🔁 Built-in Deduplication** – Optional dedup ensures each item is processed only once
 * **🛡️ Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
@@ -379,18 +379,17 @@ make bench
 
 | Benchmark                                                                            | Description                      |   ns/op |  B/op | allocs/op |
 |--------------------------------------------------------------------------------------|----------------------------------|--------:|------:|----------:|
-| [BenchmarkBatcherPut](batcher_comprehensive_benchmark_test.go)                       | Basic Put operation              |   145.2 |    11 |         0 |
-| [BenchmarkBatcherPutParallel](batcher_comprehensive_benchmark_test.go)               | Concurrent Put operations        |   308.1 |    11 |         0 |
-| [BenchmarkBatcherTrigger](batcher_comprehensive_benchmark_test.go)                   | Manual batch trigger             |   466.2 |   248 |         3 |
-| [BenchmarkBatcherWithBackground/Foreground](batcher_comprehensive_benchmark_test.go) | Foreground processing            |   146.0 |    61 |         0 |
-| [BenchmarkTimePartitionedMapSet](batcher_comprehensive_benchmark_test.go)            | Map Set operation                |   248.0 |   301 |         2 |
-| [BenchmarkTimePartitionedMapGet](batcher_comprehensive_benchmark_test.go)            | Map Get operation                |   169.2 |   236 |         2 |
-| [BenchmarkTimePartitionedMapDelete](batcher_comprehensive_benchmark_test.go)         | Map Delete operation             |   623.2 |   343 |         3 |
-| [BenchmarkTimePartitionedMapCount](batcher_comprehensive_benchmark_test.go)          | Map Count operation              |    0.54 |     0 |         0 |
-| [BenchmarkTimePartitionedMapConcurrent](batcher_comprehensive_benchmark_test.go)     | Concurrent map operations        |   345.1 |   258 |         2 |
-| [BenchmarkBatcherWithDedupPut](batcher_comprehensive_benchmark_test.go)              | Put with deduplication           |   425.3 |   402 |         4 |
-| [BenchmarkBatcher](batcher_benchmark_test.go)                                        | Full batch processing (1M items) | 1,193ms | 895MB |      3.6M |
-| [BenchmarkBatcherWithDeduplication](batcher_benchmark_test.go)                       | Deduplication processing         |   803ms | 530MB |      5.9M |
+| [BenchmarkBatcherPut](batcher_comprehensive_benchmark_test.go)                       | Basic Put operation              |   135.1 |     8 |         0 |
+| [BenchmarkBatcherPutParallel](batcher_comprehensive_benchmark_test.go)               | Concurrent Put operations        |   310.0 |     9 |         0 |
+| [BenchmarkPutComparison/Put](benchmark_comparison_test.go)                           | Put operation (non-blocking)     |   300.7 |     9 |         0 |
+| [BenchmarkPutComparison/PutWithPool](benchmark_comparison_test.go)                   | Put with slice pooling           |   309.9 |     1 |         0 |
+| [BenchmarkWithPoolComparison/Batcher](benchmark_comparison_test.go)                  | Standard batcher                 |   171.2 |    18 |         1 |
+| [BenchmarkWithPoolComparison/WithPool](benchmark_comparison_test.go)                 | Pooled batcher                   |   184.0 |     9 |         1 |
+| [BenchmarkTimePartitionedMapSet](batcher_comprehensive_benchmark_test.go)            | Map Set operation (bloom filter) |   366.7 |   147 |         6 |
+| [BenchmarkTimePartitionedMapGet](batcher_comprehensive_benchmark_test.go)            | Map Get operation (bloom filter) |    80.5 |    39 |         2 |
+| [BenchmarkBatcherWithDedupPut](batcher_comprehensive_benchmark_test.go)              | Put with deduplication           |   740.1 |   166 |         7 |
+| [BenchmarkBatcher](batcher_benchmark_test.go)                                        | Full batch processing (1M items) | 1,081ms | 710MB |      1.9M |
+| [BenchmarkBatcherWithDeduplication](batcher_benchmark_test.go)                       | Deduplication processing         |    90.7 |    13 |         0 |
 
 > Performance benchmarks for the core functions in this library, executed on an Apple M1 Max (ARM64).
 > The benchmarks demonstrate excellent performance with minimal allocations for basic operations.
