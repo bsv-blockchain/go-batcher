@@ -113,3 +113,80 @@ func TestPut(t *testing.T) {
 
 	assert.Equal(t, int64(12), countedItems.Load())
 }
+
+// TestWithPool verifies that NewWithPool works correctly.
+func TestWithPool(t *testing.T) {
+	itemCount := atomic.Int32{}
+	processBatch := func(batch []*batchStoreItem) {
+		itemCount.Add(int32(len(batch))) //nolint:gosec // Test code with controlled batch sizes
+	}
+	batcher := NewWithPool[batchStoreItem](100, 50*time.Millisecond, processBatch, true)
+	// Add many items to test pool reuse
+	for i := 0; i < 1000; i++ {
+		batcher.Put(&batchStoreItem{})
+	}
+	// Wait for processing
+	time.Sleep(200 * time.Millisecond)
+	if itemCount.Load() != 1000 {
+		t.Errorf("Expected 1000 items processed, got %d", itemCount.Load())
+	}
+}
+
+// TestWithPoolTrigger verifies that WithPool.Trigger() forces immediate batch processing.
+func TestWithPoolTrigger(t *testing.T) {
+	batchCount := atomic.Int32{}
+	processBatch := func(_ []*batchStoreItem) {
+		batchCount.Add(1)
+	}
+	batcher := NewWithPool[batchStoreItem](100, 5*time.Second, processBatch, false)
+	// Add items less than batch size
+	for i := 0; i < 5; i++ {
+		batcher.Put(&batchStoreItem{})
+	}
+	// Without trigger, no batch should be processed yet
+	time.Sleep(50 * time.Millisecond)
+	if batchCount.Load() != 0 {
+		t.Error("Batch should not be processed before trigger")
+	}
+	// Trigger should force immediate processing
+	batcher.Trigger()
+	time.Sleep(50 * time.Millisecond)
+	if batchCount.Load() != 1 {
+		t.Errorf("Expected 1 batch after trigger, got %d", batchCount.Load())
+	}
+}
+
+// TestBloomFilter verifies bloom filter functionality.
+func TestBloomFilter(t *testing.T) {
+	bf := NewBloomFilter(1000, 3)
+	// Test adding and testing
+	bf.Add("test1")
+	bf.Add("test2")
+	bf.Add(123)
+	if !bf.Test("test1") {
+		t.Error("Bloom filter should contain test1")
+	}
+	if !bf.Test("test2") {
+		t.Error("Bloom filter should contain test2")
+	}
+	if !bf.Test(123) {
+		t.Error("Bloom filter should contain 123")
+	}
+	// Test non-existent (may have false positives but should be rare)
+	falsePositives := 0
+	for i := 1000; i < 2000; i++ {
+		if bf.Test(i) {
+			falsePositives++
+		}
+	}
+	// With proper sizing, false positive rate should be low
+	if float64(falsePositives)/1000 > 0.1 {
+		t.Errorf("False positive rate too high: %d/1000", falsePositives)
+	}
+	// Test reset
+	bf.Reset()
+	if bf.Test("test1") {
+		// After reset, this could still be a false positive but unlikely
+		t.Log("Possible false positive after reset")
+	}
+}

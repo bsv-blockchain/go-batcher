@@ -211,7 +211,11 @@ func BenchmarkBatcherWithDedupDuplicates(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		// Create duplicates by using modulo - 90% duplicates
-		batcher.Put(&testItem{ID: i % (b.N / 10)})
+		divisor := b.N / 10
+		if divisor == 0 {
+			divisor = 1
+		}
+		batcher.Put(&testItem{ID: i % divisor})
 	}
 
 	batcher.Trigger()

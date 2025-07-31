@@ -11,7 +11,7 @@ import (
 
 // TestIntegratedOptimizations tests multiple optimizations working together.
 func TestIntegratedOptimizations(t *testing.T) { //nolint:gocognit,gocyclo // Test requires complex scenarios
-	// Combined test of WithPool and WithDedupOptimized
+	// Combined test of WithPool and WithDeduplication
 	t.Run("PoolWithDeduplication", func(t *testing.T) {
 		processedItems := make(map[int]int)
 		var mu sync.Mutex
@@ -27,7 +27,7 @@ func TestIntegratedOptimizations(t *testing.T) { //nolint:gocognit,gocyclo // Te
 		// Create a batcher with pool
 		poolBatcher := NewWithPool[testItem](50, 20*time.Millisecond, func(batch []*testItem) {
 			// Then pass to dedup batcher
-			dedupBatcher := NewWithDeduplicationOptimized[testItem](50, 20*time.Millisecond, processBatch, false)
+			dedupBatcher := NewWithDeduplication[testItem](50, 20*time.Millisecond, processBatch, false)
 			for _, item := range batch {
 				dedupBatcher.Put(item)
 			}
@@ -53,31 +53,28 @@ func TestIntegratedOptimizations(t *testing.T) { //nolint:gocognit,gocyclo // Te
 		}
 	})
 
-	// Test all optimizations together
-	t.Run("AllOptimizationsCombined", func(t *testing.T) {
+	// Test all features together
+	t.Run("AllFeaturesCombined", func(t *testing.T) {
 		// Track metrics
 		totalProcessed := atomic.Int32{}
-		uniqueProcessed := atomic.Int32{}
 		batchCount := atomic.Int32{}
 
-		// Time-partitioned map for tracking
-		dedupMap := NewTimePartitionedMapOptimized[int, struct{}](100*time.Millisecond, 10)
-		defer dedupMap.Close()
+		// Use map to track processed items
+		processedItems := make(map[int]bool)
+		var mu sync.Mutex
 
 		processBatch := func(batch []*testItem) {
 			batchCount.Add(1)
-			unique := 0
+			mu.Lock()
+			defer mu.Unlock()
 			for _, item := range batch {
 				totalProcessed.Add(1)
-				if dedupMap.SetOptimized(item.ID, struct{}{}) {
-					unique++
-				}
+				processedItems[item.ID] = true
 			}
-			uniqueProcessed.Add(int32(unique)) //nolint:gosec // Test code with controlled input
 		}
 
-		// Use all optimizations
-		batcher := NewWithPool[testItem](100, 30*time.Millisecond, processBatch, true)
+		// Use both pool and deduplication features
+		batcher := NewWithDeduplicationAndPool[testItem](100, 30*time.Millisecond, processBatch, true)
 
 		// Concurrent writers
 		var wg sync.WaitGroup
@@ -98,16 +95,20 @@ func TestIntegratedOptimizations(t *testing.T) { //nolint:gocognit,gocyclo // Te
 		wg.Wait()
 		time.Sleep(100 * time.Millisecond)
 
-		t.Logf("Total processed: %d, Unique: %d, Batches: %d",
-			totalProcessed.Load(), uniqueProcessed.Load(), batchCount.Load())
+		mu.Lock()
+		uniqueCount := len(processedItems)
+		mu.Unlock()
 
-		if uniqueProcessed.Load() != 1000 {
-			t.Errorf("Expected 1000 unique items, got %d", uniqueProcessed.Load())
+		t.Logf("Total processed: %d, Unique: %d, Batches: %d",
+			totalProcessed.Load(), uniqueCount, batchCount.Load())
+
+		if uniqueCount != 1000 {
+			t.Errorf("Expected 1000 unique items, got %d", uniqueCount)
 		}
 	})
 }
 
-// TestLongRunningStability tests the optimized implementations over extended periods.
+// TestLongRunningStability tests the implementations over extended periods.
 func TestLongRunningStability(t *testing.T) { //nolint:gocognit,gocyclo // Test requires complex scenarios
 	if testing.Short() {
 		t.Skip("Skipping long-running test in short mode")
@@ -127,7 +128,7 @@ func TestLongRunningStability(t *testing.T) { //nolint:gocognit,gocyclo // Test 
 			time.Sleep(time.Millisecond)
 		}
 
-		// Create optimized batcher
+		// Create batcher
 		batcher := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
 
 		// Run for extended period
@@ -185,7 +186,7 @@ func TestLongRunningStability(t *testing.T) { //nolint:gocognit,gocyclo // Test 
 			time.Sleep(10 * time.Millisecond)     // Slow processing
 		}
 
-		batcher := NewOptimized[testItem](50, 100*time.Millisecond, processBatch, true)
+		batcher := New[testItem](50, 100*time.Millisecond, processBatch, true)
 
 		// Add items continuously
 		done := make(chan bool)
@@ -195,7 +196,7 @@ func TestLongRunningStability(t *testing.T) { //nolint:gocognit,gocyclo // Test 
 				case <-done:
 					return
 				default:
-					batcher.PutOptimized(&testItem{ID: int(itemsAdded.Load())})
+					batcher.Put(&testItem{ID: int(itemsAdded.Load())})
 					itemsAdded.Add(1)
 					time.Sleep(time.Millisecond)
 				}
@@ -246,11 +247,11 @@ func TestLongRunningStability(t *testing.T) { //nolint:gocognit,gocyclo // Test 
 			successCount.Add(1)
 		}
 
-		batcher := NewOptimized[testItem](10, 50*time.Millisecond, processBatch, true)
+		batcher := New[testItem](10, 50*time.Millisecond, processBatch, true)
 
 		// Add items that will trigger panics
 		for i := 0; i < 200; i++ {
-			batcher.PutOptimized(&testItem{ID: i})
+			batcher.Put(&testItem{ID: i})
 		}
 
 		// Trigger to ensure all items are processed
@@ -281,10 +282,10 @@ func TestResourceCleanup(t *testing.T) { //nolint:gocognit // Test requires comp
 				time.Sleep(time.Millisecond)
 			}
 
-			// Create different types of optimized batchers
-			b1 := NewOptimized[testItem](100, 50*time.Millisecond, processBatch, true)
+			// Create different types of batchers
+			b1 := New[testItem](100, 50*time.Millisecond, processBatch, true)
 			b2 := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
-			b3 := NewWithDeduplicationOptimized[testItem](100, 50*time.Millisecond, processBatch, true)
+			b3 := NewWithDeduplication[testItem](100, 50*time.Millisecond, processBatch, true)
 
 			// Use them
 			for j := 0; j < 100; j++ {
@@ -311,16 +312,17 @@ func TestResourceCleanup(t *testing.T) { //nolint:gocognit // Test requires comp
 	})
 
 	t.Run("TimePartitionedMapCleanup", func(_ *testing.T) {
-		maps := make([]*TimePartitionedMapOptimized[int, string], 10)
+		maps := make([]*TimePartitionedMap[int, string], 10)
 
 		// Create multiple maps
 		for i := 0; i < 10; i++ {
-			m := NewTimePartitionedMapOptimized[int, string](50*time.Millisecond, 5)
+			m := NewTimePartitionedMap[int, string](50*time.Millisecond, 5)
+			defer m.Close()
 			maps[i] = m
 
 			// Add data
 			for j := 0; j < 1000; j++ {
-				m.SetOptimized(j, fmt.Sprintf("value_%d_%d", i, j))
+				m.Set(j, fmt.Sprintf("value_%d_%d", i, j))
 			}
 		}
 
@@ -334,8 +336,8 @@ func TestResourceCleanup(t *testing.T) { //nolint:gocognit // Test requires comp
 
 		// Try to use after close (should not panic)
 		for _, m := range maps {
-			m.SetOptimized(999, "after_close")
-			_, _ = m.GetOptimized(999)
+			m.Set(999, "after_close")
+			_, _ = m.Get(999)
 		}
 	})
 }

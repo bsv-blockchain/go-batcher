@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -592,4 +593,61 @@ func TestTimePartitionedMap(t *testing.T) { //nolint:gocognit,gocyclo // Compreh
 			t.Fatalf("Expected to find %d items, found %d", 1_000_000, found.Load())
 		}
 	})
+}
+
+// TestTimePartitionedMapOptimized verifies the optimized Get and Set methods.
+func TestTimePartitionedMapOptimized(t *testing.T) {
+	m := NewTimePartitionedMap[string, int](time.Second, 5)
+	defer m.Close()
+	// Test Set with bloom filter
+	if !m.Set("key1", 1) {
+		t.Error("Expected Set to return true for new key")
+	}
+	// Test duplicate detection
+	if m.Set("key1", 2) {
+		t.Error("Expected Set to return false for duplicate key")
+	}
+	// Test Get with bloom filter
+	val, exists := m.Get("key1")
+	if !exists || val != 1 {
+		t.Errorf("Expected Get to find key1 with value 1, got %v, %v", val, exists)
+	}
+	// Test non-existent key
+	_, exists = m.Get("nonexistent")
+	if exists {
+		t.Error("Expected Get to return false for non-existent key")
+	}
+}
+
+// TestWithDeduplicationAndPool tests the new pooling version.
+func TestWithDeduplicationAndPool(t *testing.T) {
+	processedItems := make(map[int]bool)
+	var mu sync.Mutex
+	processBatch := func(batch []*testItem) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, item := range batch {
+			if processedItems[item.ID] {
+				t.Errorf("Duplicate item processed: %d", item.ID)
+			}
+			processedItems[item.ID] = true
+		}
+	}
+	batcher := NewWithDeduplicationAndPool[testItem](10, 50*time.Millisecond, processBatch, false)
+	defer batcher.Close()
+	// Add items with duplicates
+	for i := 0; i < 20; i++ {
+		batcher.Put(&testItem{ID: i})
+		// Add duplicate
+		batcher.Put(&testItem{ID: i})
+	}
+	// Trigger processing
+	batcher.Trigger()
+	time.Sleep(100 * time.Millisecond)
+	// Verify only unique items were processed
+	mu.Lock()
+	defer mu.Unlock()
+	if len(processedItems) != 20 {
+		t.Errorf("Expected 20 unique items, got %d", len(processedItems))
+	}
 }

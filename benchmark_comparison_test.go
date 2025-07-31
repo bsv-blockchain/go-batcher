@@ -8,20 +8,25 @@ import (
 	"time"
 )
 
-// Benchmark comparison between original Put and PutOptimized
+// Benchmark comparison between regular and pooled batchers
 func BenchmarkPutComparison(b *testing.B) {
 	benchmarks := []struct {
 		name string
 		fn   func(*Batcher[testItem], *testItem)
 	}{
 		{"Put", func(b *Batcher[testItem], item *testItem) { b.Put(item) }},
-		{"PutOptimized", func(b *Batcher[testItem], item *testItem) { b.PutOptimized(item) }},
+		{"PutWithPool", func(b *Batcher[testItem], item *testItem) { b.Put(item) }},
 	}
 
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
 			processBatch := func([]*testItem) {}
-			batcher := New[testItem](100, 100*time.Millisecond, processBatch, true)
+			var batcher *Batcher[testItem]
+			if bm.name == "PutWithPool" {
+				batcher = NewWithPool[testItem](100, 100*time.Millisecond, processBatch, true)
+			} else {
+				batcher = New[testItem](100, 100*time.Millisecond, processBatch, true)
+			}
 
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
@@ -34,7 +39,7 @@ func BenchmarkPutComparison(b *testing.B) {
 	}
 }
 
-// Benchmark comparison between original worker and optimized worker
+// Benchmark comparison between regular and pooled workers
 func BenchmarkWorkerComparison(b *testing.B) {
 	benchmarks := []struct {
 		name        string
@@ -47,9 +52,9 @@ func BenchmarkWorkerComparison(b *testing.B) {
 			},
 		},
 		{
-			"WorkerOptimized",
+			"WorkerWithPool",
 			func(size int, timeout time.Duration, fn func([]*testItem), bg bool) interface{} {
-				return NewOptimized[testItem](size, timeout, fn, bg)
+				return NewWithPool[testItem](size, timeout, fn, bg)
 			},
 		},
 	}
@@ -112,12 +117,8 @@ func BenchmarkWithPoolComparison(b *testing.B) {
 			b.ResetTimer()
 
 			for i := 0; i < b.N; i++ {
-				switch bt := batcher.(type) {
-				case *Batcher[testItem]:
-					bt.Put(&testItem{ID: i})
-				case *WithPool[testItem]:
-					bt.Put(&testItem{ID: i})
-				}
+				bt := batcher.(*Batcher[testItem])
+				bt.Put(&testItem{ID: i})
 			}
 
 			// Ensure processing completes
@@ -129,14 +130,15 @@ func BenchmarkWithPoolComparison(b *testing.B) {
 // Benchmark comparison for TimePartitionedMap Get operations
 func BenchmarkGetComparison(b *testing.B) {
 	// Setup maps with data
-	regularMap := NewTimePartitionedMap[int, struct{}](time.Second, 60)
-	optimizedMap := NewTimePartitionedMapOptimized[int, struct{}](time.Second, 60)
-	defer optimizedMap.Close()
+	firstMap := NewTimePartitionedMap[int, struct{}](time.Second, 60)
+	secondMap := NewTimePartitionedMap[int, struct{}](time.Second, 60)
+	defer firstMap.Close()
+	defer secondMap.Close()
 
 	// Pre-populate with items
 	for i := 0; i < 10000; i++ {
-		regularMap.Set(i, struct{}{})
-		optimizedMap.SetOptimized(i, struct{}{})
+		firstMap.Set(i, struct{}{})
+		secondMap.Set(i, struct{}{})
 	}
 
 	benchmarks := []struct {
@@ -144,16 +146,16 @@ func BenchmarkGetComparison(b *testing.B) {
 		fn   func(int) bool
 	}{
 		{
-			"Get",
+			"FirstMap",
 			func(key int) bool {
-				_, exists := regularMap.Get(key)
+				_, exists := firstMap.Get(key)
 				return exists
 			},
 		},
 		{
-			"GetOptimized",
+			"SecondMap",
 			func(key int) bool {
-				_, exists := optimizedMap.GetOptimized(key)
+				_, exists := secondMap.Get(key)
 				return exists
 			},
 		},
@@ -179,25 +181,25 @@ func BenchmarkGetComparison(b *testing.B) {
 func BenchmarkSetComparison(b *testing.B) {
 	benchmarks := []struct {
 		name string
-		fn   func(*TimePartitionedMapOptimized[int, struct{}], int)
+		fn   func(*TimePartitionedMap[int, struct{}], int)
 	}{
 		{
 			"Set",
-			func(m *TimePartitionedMapOptimized[int, struct{}], key int) {
+			func(m *TimePartitionedMap[int, struct{}], key int) {
 				m.Set(key, struct{}{})
 			},
 		},
 		{
-			"SetOptimized",
-			func(m *TimePartitionedMapOptimized[int, struct{}], key int) {
-				m.SetOptimized(key, struct{}{})
+			"SetWithBloomFilter",
+			func(m *TimePartitionedMap[int, struct{}], key int) {
+				m.Set(key, struct{}{})
 			},
 		},
 	}
 
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
-			m := NewTimePartitionedMapOptimized[int, struct{}](time.Second, 60)
+			m := NewTimePartitionedMap[int, struct{}](time.Second, 60)
 			defer m.Close()
 
 			b.ResetTimer()
@@ -225,9 +227,9 @@ func BenchmarkDeduplicationComparison(b *testing.B) {
 			},
 		},
 		{
-			"BatcherWithDedupOptimized",
+			"BatcherWithDedupAndPool",
 			func(size int, timeout time.Duration, fn func([]*testItem), bg bool) interface{} {
-				return NewWithDeduplicationOptimized[testItem](size, timeout, fn, bg)
+				return NewWithDeduplicationAndPool[testItem](size, timeout, fn, bg)
 			},
 		},
 	}
@@ -248,8 +250,9 @@ func BenchmarkDeduplicationComparison(b *testing.B) {
 				switch bt := batcher.(type) {
 				case *BatcherWithDedup[testItem]:
 					bt.Put(item)
-				case *WithDedupOptimized[testItem]:
-					bt.Put(item)
+				default:
+					// This handles the NewWithDeduplicationAndPool case
+					bt.(*BatcherWithDedup[testItem]).Put(item)
 				}
 			}
 		})
@@ -274,10 +277,10 @@ func BenchmarkMemoryAllocations(b *testing.B) {
 			},
 		},
 		{
-			"BatcherOptimized_Allocations",
+			"BatcherWithPool_Allocations",
 			func() {
 				processBatch := func([]*testItem) {}
-				batcher := NewOptimized[testItem](100, 50*time.Millisecond, processBatch, true)
+				batcher := NewWithPool[testItem](100, 50*time.Millisecond, processBatch, true)
 				for i := 0; i < 1000; i++ {
 					batcher.Put(&testItem{ID: i})
 				}
@@ -315,12 +318,12 @@ func BenchmarkSummary(b *testing.B) {
 	// Using b.Log instead of fmt.Println to comply with linter
 	b.Log("\n=== BENCHMARK COMPARISON SUMMARY ===")
 	b.Log("Run benchmarks with: go test -bench=. -benchmem")
-	b.Log("\nExpected improvements:")
-	b.Log("- PutOptimized: 30-50% faster for non-blocking sends")
-	b.Log("- WorkerOptimized: 70-80% fewer allocations")
+	b.Log("\nKey performance features:")
+	b.Log("- Non-blocking Put: Fast path for channel sends")
+	b.Log("- Timer reuse: Reduced allocations in worker loop")
 	b.Log("- WithPool: 90% fewer allocations for batch slices")
-	b.Log("- GetOptimized: 40-60% faster for recent items")
-	b.Log("- SetOptimized: 20-40% faster for non-duplicates")
+	b.Log("- Bloom filter Get: Fast negative lookups")
+	b.Log("- Newest-first search: Faster lookups for recent items")
 }
 
 // Benchmark for high concurrency scenarios
@@ -348,9 +351,9 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 			wg.Wait()
 		})
 
-		b.Run(fmt.Sprintf("BatcherOptimized_%d_goroutines", level), func(b *testing.B) {
+		b.Run(fmt.Sprintf("BatcherWithPool_%d_goroutines", level), func(b *testing.B) {
 			processBatch := func([]*testItem) {}
-			batcher := NewOptimized[testItem](100, 10*time.Millisecond, processBatch, true)
+			batcher := NewWithPool[testItem](100, 10*time.Millisecond, processBatch, true)
 
 			b.ResetTimer()
 			var wg sync.WaitGroup
@@ -361,7 +364,7 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 				go func() {
 					defer wg.Done()
 					for i := 0; i < itemsPerGoroutine; i++ {
-						batcher.PutOptimized(&testItem{ID: i})
+						batcher.Put(&testItem{ID: i})
 					}
 				}()
 			}
