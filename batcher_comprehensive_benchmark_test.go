@@ -301,6 +301,7 @@ func BenchmarkTimeoutVsSize(b *testing.B) {
 // BenchmarkMemoryUsage measures memory allocation patterns.
 func BenchmarkMemoryUsage(b *testing.B) {
 	b.Run("BasicBatcher", func(b *testing.B) {
+		// Empty batch function - we're only measuring batcher overhead, not processing
 		batchFn := func(_ []*batchStoreItem) {}
 
 		b.ReportAllocs()
@@ -314,6 +315,7 @@ func BenchmarkMemoryUsage(b *testing.B) {
 	})
 
 	b.Run("BatcherWithDedup", func(b *testing.B) {
+		// Empty batch function - we're only measuring batcher overhead, not processing
 		batchFn := func(_ []*testItem) {}
 
 		b.ReportAllocs()

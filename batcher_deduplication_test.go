@@ -715,11 +715,12 @@ func TestTimePartitionedMapBoundaryConditions(t *testing.T) { //nolint:gocognit 
 
 	t.Run("SingleBucketBehavior", func(t *testing.T) {
 		// Test with maxBuckets = 1
-		bucketDuration := 50 * time.Millisecond
-		m := NewTimePartitionedMap[int, string](bucketDuration, 1)
-		defer m.Close()
+		// Create separate instances for each subtest to avoid timing dependencies
 
 		t.Run("SingleBucketOperations", func(t *testing.T) {
+			bucketDuration := 50 * time.Millisecond
+			m := NewTimePartitionedMap[int, string](bucketDuration, 1)
+			defer m.Close()
 			// Add items to single bucket
 			setOK := m.Set(1, "value1")
 			require.True(t, setOK, "Set should succeed in single bucket")
@@ -741,25 +742,44 @@ func TestTimePartitionedMapBoundaryConditions(t *testing.T) { //nolint:gocognit 
 		})
 
 		t.Run("SingleBucketExpiration", func(t *testing.T) {
-			// Wait for bucket to expire and add new items
-			time.Sleep(bucketDuration * 3)
+			bucketDuration := 100 * time.Millisecond // Use longer duration for stability
+			m := NewTimePartitionedMap[int, string](bucketDuration, 1)
+			defer m.Close()
 
-			setOK := m.Set(3, "value3")
-			require.True(t, setOK, "Set should succeed after bucket expiration")
+			// Add initial items
+			setOK := m.Set(1, "value1")
+			require.True(t, setOK, "Initial set should succeed")
+			setOK = m.Set(2, "value2")
+			require.True(t, setOK, "Second initial set should succeed")
 
-			// Old items should be gone
+			// Verify items exist initially
 			_, exists1 := m.Get(1)
 			_, exists2 := m.Get(2)
+			assert.True(t, exists1, "Item 1 should exist initially")
+			assert.True(t, exists2, "Item 2 should exist initially")
+
+			// Wait for items to expire (cleanup runs every bucketDuration/2)
+			// With maxBuckets=1, items older than bucketDuration are removed
+			time.Sleep(bucketDuration + bucketDuration/2 + 10*time.Millisecond)
+
+			// Check that old items are gone
+			_, exists1 = m.Get(1)
+			_, exists2 = m.Get(2)
 			assert.False(t, exists1, "First item should be expired")
 			assert.False(t, exists2, "Second item should be expired")
 
-			// New item should exist
+			// Add a new item in the current time window
+			setOK = m.Set(3, "value3")
+			require.True(t, setOK, "Set should succeed for new item")
+
+			// Immediately verify the new item exists
 			val3, exists3 := m.Get(3)
 			assert.True(t, exists3, "New item should exist")
 			assert.Equal(t, "value3", val3, "New item should have correct value")
 
+			// Count should reflect only the new item
 			count := m.Count()
-			assert.Equal(t, 1, count, "Count should be 1 after expiration")
+			assert.Equal(t, 1, count, "Count should be 1 with only new item")
 		})
 	})
 

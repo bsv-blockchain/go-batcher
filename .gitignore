@@ -42,6 +42,7 @@ testdata
 
 # Node modules
 node_modules/
+internal_docs/
 
 # Coverage
 coverage.html
