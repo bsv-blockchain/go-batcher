@@ -1,7 +1,7 @@
 github.com/bsv-blockchain/go-bt/v2 v2.4.6 h1:Vnn2pmU+fE1idSFo/Y/6w4O0ilF14vnwiEnFKk8oNJE=
 github.com/bsv-blockchain/go-bt/v2 v2.4.6/go.mod h1:kLzhgnYmm5d94HNzyCw4onvNCBrxJgZ+9ZpL/5co9RY=
-github.com/bsv-blockchain/go-tx-map v1.1.0 h1:m26SaIqIbMtWzoZ+W7yD3t1UUP5vuHcOnJ8NXQNFses=
-github.com/bsv-blockchain/go-tx-map v1.1.0/go.mod h1:xKY7n53DqdjyE27jWrfhbR9ukyTgIsib6KB7gmdtsdA=
+github.com/bsv-blockchain/go-tx-map v1.1.1 h1:mErqnuIZ36uUe4JDarMmBTOOtinM64rCi2bYKApEujU=
+github.com/bsv-blockchain/go-tx-map v1.1.1/go.mod h1:CrK9OoN23KCwRA++/TELZEwnj9uPHMhQG8b95Qb6Vcw=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dolthub/maphash v0.1.0 h1:bsQ7JsF4FkkWyrP3oCnFJgrCUAFbFf3kOl4L/QxPDyQ=
@@ -22,8 +22,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 golang.org/x/sync v0.17.0 h1:l60nONMj9l5drqw6jlhIELNv9I0A4OFgRsG9k2oT9Ug=
 golang.org/x/sync v0.17.0/go.mod h1:9KTHXmSnoGruLpwFjVSX0lNNA75CykiMECbovNTZqGI=
-google.golang.org/protobuf v1.36.6 h1:z1NpPI8ku2WgiWnf+t9wTPsn6eP1L7ksHUlkfLvd9xY=
-google.golang.org/protobuf v1.36.6/go.mod h1:jduwjTPXsFjZGTmRluh+L6NjiWu7pchiJ2/5YcXBHnY=
+google.golang.org/protobuf v1.36.9 h1:w2gp2mA27hUeUzj9Ex9FBjsBm40zfaDtEWow293U7Iw=
+google.golang.org/protobuf v1.36.9/go.mod h1:fuxRtAxBytpl4zzqUh6/eyUujkJdNiuEkXntxiD/uRU=
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
 gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
