@@ -152,7 +152,7 @@ b := batcher.NewWithDeduplicationAndPool[string](100, time.Second, processFn, tr
 
 ### Why You'll Love This Batcher
 
-* **⚡Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
+* **Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
 * **Smart Batching** – Auto-groups by size or time interval, whichever comes first
 * **Optional Deduplication** – Built-in dedup variant ensures each item is processed only once within a time window
 * **Memory Pool Optimization** – Optional slice pooling reduces GC pressure in high-throughput scenarios
