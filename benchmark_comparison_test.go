@@ -248,7 +248,7 @@ func BenchmarkDeduplicationComparison(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				// Create 50% duplicates by using modulo
-				id := i % (b.N / 2)
+				id := i % max(1, b.N/2)
 				item := &testItem{ID: id}
 
 				switch bt := batcher.(type) {
@@ -349,7 +349,7 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 
 			b.ResetTimer()
 			var wg sync.WaitGroup
-			itemsPerGoroutine := b.N / level
+			itemsPerGoroutine := max(1, b.N/level)
 
 			for g := 0; g < level; g++ {
 				wg.Add(1)
@@ -371,7 +371,7 @@ func BenchmarkHighConcurrency(b *testing.B) { //nolint:gocognit // Benchmark tes
 
 			b.ResetTimer()
 			var wg sync.WaitGroup
-			itemsPerGoroutine := b.N / level
+			itemsPerGoroutine := max(1, b.N/level)
 
 			for g := 0; g < level; g++ {
 				wg.Add(1)
