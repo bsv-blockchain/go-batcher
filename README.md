@@ -152,15 +152,15 @@ b := batcher.NewWithDeduplicationAndPool[string](100, time.Second, processFn, tr
 
 ### Why You'll Love This Batcher
 
-* **⚡ Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
-* **🧠 Smart Batching** – Auto-groups by size or time interval, whichever comes first
-* **🔁 Optional Deduplication** – Built-in dedup variant ensures each item is processed only once within a time window
-* **🏊 Memory Pool Optimization** – Optional slice pooling reduces GC pressure in high-throughput scenarios
-* **🛡️ Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
-* **⏱️ Time-Partitioned Storage** – Efficient memory usage with automatic cleanup (dedup variant)
-* **🎯 Minimal Dependencies** – Pure Go with only essential external dependencies
-* **🔧 Flexible Configuration** – Multiple constructor variants for different use cases
-* **📊 Production-Ready** – Battle-tested with full test coverage and benchmarks
+* **⚡Blazing Performance** – Process millions of items with minimal overhead ([benchmarks](#benchmark-results): 135 ns/op)
+* **Smart Batching** – Auto-groups by size or time interval, whichever comes first
+* **Optional Deduplication** – Built-in dedup variant ensures each item is processed only once within a time window
+* **Memory Pool Optimization** – Optional slice pooling reduces GC pressure in high-throughput scenarios
+* **Thread-Safe by Design** – Concurrent Put() from multiple goroutines without worry
+* **Time-Partitioned Storage** – Efficient memory usage with automatic cleanup (dedup variant)
+* **Minimal Dependencies** – Pure Go with only essential external dependencies
+* **Flexible Configuration** – Multiple constructor variants for different use cases
+* **Production-Ready** – Battle-tested with full test coverage and benchmarks
 
 Perfect for high-throughput scenarios like log aggregation, metrics collection, event processing, or any situation where you need to efficiently batch operations for downstream systems.
 
