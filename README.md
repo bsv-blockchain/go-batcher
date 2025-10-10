@@ -115,13 +115,13 @@ func main() {
         },
         true, // background processing
     )
-    
+
     // Feed items - they'll be intelligently batched
     for i := 0; i < 5000; i++ {
         item := fmt.Sprintf("item-%d", i)
         b.Put(&item)
     }
-    
+
     // Process any remaining items before shutdown
     b.Trigger()
     // Note: The batcher worker runs indefinitely - use context cancellation for cleanup
