@@ -24,7 +24,7 @@ func FuzzBatcherPut(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz tests requ
 	f.Add(1, 1, 1)         // Minimal values
 	f.Add(0, 100, 10)      // Zero batch size (should be handled)
 
-	f.Fuzz(func(t *testing.T, batchSize int, timeoutMs int, itemCount int) {
+	f.Fuzz(func(t *testing.T, batchSize, timeoutMs, itemCount int) {
 		// Skip invalid inputs
 		if batchSize < 0 || timeoutMs < 0 || itemCount < 0 {
 			t.Skip("Skipping negative values")
@@ -98,7 +98,7 @@ func FuzzBatcherConcurrent(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz tes
 	f.Add(100, 10, 10, 10) // many goroutines, few items
 	f.Add(2, 2, 1000, 100) // few goroutines, many items
 
-	f.Fuzz(func(t *testing.T, numGoroutines int, numTriggers int, itemsPerGoroutine int, batchSize int) {
+	f.Fuzz(func(t *testing.T, numGoroutines, numTriggers, itemsPerGoroutine, batchSize int) {
 		// Skip invalid inputs
 		if numGoroutines <= 0 || numTriggers < 0 || itemsPerGoroutine < 0 || batchSize <= 0 {
 			t.Skip("Skipping invalid values")
@@ -190,7 +190,7 @@ func FuzzTimePartitionedMap(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz te
 	f.Add(1, 1, 10)       // minimal values
 	f.Add(5000, 100, 500) // large values
 
-	f.Fuzz(func(t *testing.T, bucketMs int, maxBuckets int, numOperations int) {
+	f.Fuzz(func(t *testing.T, bucketMs, maxBuckets, numOperations int) {
 		// Skip invalid inputs
 		if bucketMs <= 0 || maxBuckets <= 0 || numOperations < 0 {
 			t.Skip("Skipping invalid values")
@@ -269,7 +269,7 @@ func FuzzBatcherWithDedup(f *testing.F) { //nolint:gocognit,gocyclo // Fuzz test
 	f.Add(5, 50, 100, 100)   // all unique
 	f.Add(1, 10, 10, 1)      // all duplicates
 
-	f.Fuzz(func(t *testing.T, batchSize int, timeoutMs int, totalItems int, uniqueItems int) {
+	f.Fuzz(func(t *testing.T, batchSize, timeoutMs, totalItems, uniqueItems int) {
 		// Skip invalid inputs
 		if batchSize <= 0 || timeoutMs <= 0 || totalItems < 0 || uniqueItems < 0 {
 			t.Skip("Skipping invalid values")
@@ -364,7 +364,7 @@ func FuzzConcurrentTimePartitionedMap(f *testing.F) { //nolint:gocognit,gocyclo 
 	f.Add(5, 200, 100) // low concurrency, many operations
 	f.Add(100, 10, 10) // very high concurrency
 
-	f.Fuzz(func(t *testing.T, numGoroutines int, opsPerGoroutine int, keyRange int) {
+	f.Fuzz(func(t *testing.T, numGoroutines, opsPerGoroutine, keyRange int) {
 		// Skip invalid inputs
 		if numGoroutines <= 0 || opsPerGoroutine <= 0 || keyRange <= 0 {
 			t.Skip("Skipping invalid values")
