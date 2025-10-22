@@ -173,11 +173,6 @@ Perfect for high-throughput scenarios like log aggregation, metrics collection, 
 go get -u github.com/bsv-blockchain/go-batcher
 ```
 
-Get the [MAGE-X](https://github.com/mrz1836/mage-x) build tool for development:
-```shell script
-go install github.com/mrz1836/mage-x/cmd/magex@latest
-```
-
 <br/>
 
 ## 📚 Documentation
@@ -188,6 +183,23 @@ go install github.com/mrz1836/mage-x/cmd/magex@latest
 - **Test Suite** – Review both the [unit tests](batcher_test.go) and [fuzz tests](batcher_fuzz_test.go) (powered by [`testify`](https://github.com/stretchr/testify))
 
 <br/>
+
+<details>
+<summary><strong><code>Development Build Commands</code></strong></summary>
+<br/>
+
+Get the [MAGE-X](https://github.com/mrz1836/mage-x) build tool for development:
+```shell script
+go install github.com/mrz1836/mage-x/cmd/magex@latest
+```
+
+View all build commands
+
+```bash script
+magex help
+```
+
+</details>
 
 <details>
 <summary><strong><code>Repository Features</code></strong></summary>
@@ -304,18 +316,6 @@ magex deps:update
 ```
 
 This command ensures all dependencies are brought up to date in a single step, including Go modules and any tools managed by [MAGE-X](https://github.com/mrz1836/mage-x). It is the recommended way to keep your development environment and CI in sync with the latest versions.
-
-</details>
-
-<details>
-<summary><strong><code>Build Commands</code></strong></summary>
-<br/>
-
-View all build commands
-
-```bash script
-magex help
-```
 
 </details>
 
