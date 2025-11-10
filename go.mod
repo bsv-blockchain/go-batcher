@@ -7,7 +7,7 @@ toolchain go1.24.5
 require (
 	github.com/bsv-blockchain/go-tx-map v1.2.0
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sync v0.17.0
+	golang.org/x/sync v0.18.0
 )
 
 require (
