@@ -5,7 +5,7 @@ go 1.24.3
 toolchain go1.24.5
 
 require (
-	github.com/bsv-blockchain/go-tx-map v1.2.0
+	github.com/bsv-blockchain/go-tx-map v1.2.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.18.0
 )
@@ -19,3 +19,6 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// Security: Force golang.org/x/crypto to v0.45.0 to fix CVE-2025-47914 and CVE-2025-58181
+replace golang.org/x/crypto => golang.org/x/crypto v0.45.0
