@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
@@ -675,6 +676,7 @@ type BatcherWithDedup[T comparable] struct { //nolint:revive // Name is clear an
 func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &BatcherWithDedup[T]{
 		Batcher: Batcher[T]{
 			fn:         fn,
@@ -685,6 +687,8 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    false,
+			ctx:        ctx,
+			cancelFunc: cancel,
 		},
 		deduplicationWindow: deduplicationWindow,
 		// Create an optimized time-partitioned map with bloom filter
@@ -700,6 +704,7 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &BatcherWithDedup[T]{
 		Batcher: Batcher[T]{
 			fn:         fn,
@@ -710,6 +715,8 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    true,
+			ctx:        ctx,
+			cancelFunc: cancel,
 			pool: &sync.Pool{
 				New: func() interface{} {
 					slice := make([]*T, 0, size)
@@ -727,8 +734,19 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 	return b
 }
 
-// Close properly shuts down the deduplication map resources.
+// Close properly shuts down the batcher and deduplication map resources.
+//
+// This method performs a graceful shutdown by:
+// 1. Stopping the background worker goroutine via the parent Batcher.Close()
+// 2. Processing any remaining items in the queue
+// 3. Closing the deduplication map and stopping its cleanup ticker
+//
+// It is safe to call Close() multiple times (subsequent calls have no effect).
+//
+// IMPORTANT: Do not call Put() after Close() has been called, as this will
+// result in a panic due to sending on a closed channel.
 func (b *BatcherWithDedup[T]) Close() {
+	b.Batcher.Close()
 	b.deduplicationMap.Close()
 }
 

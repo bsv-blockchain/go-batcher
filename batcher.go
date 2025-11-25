@@ -10,6 +10,14 @@
 // - Background processing option to avoid blocking the caller
 // - Manual trigger capability for immediate batch processing
 // - Thread-safe concurrent operations
+// - Zero idle CPU usage: Lazy timer activation only when items are batched
+// - Graceful shutdown support with Close() for clean goroutine lifecycle
+//
+// Performance characteristics:
+// - Idle state: 0% CPU usage (no timers running when batch is empty)
+// - Active state: Full performance with low-latency batching (configurable timeout)
+// - Peak performance: Maintains throughput regardless of load
+// - Memory efficient: Optional slice pooling to reduce GC pressure
 //
 // The package is structured to provide two main components:
 // - Basic Batcher: Simple batching with size and timeout-based triggers
@@ -22,18 +30,21 @@
 //	    db.BulkInsert(batch)
 //	}, true)
 //	batcher.Put(&User{Name: "John"})
+//	defer batcher.Close() // Graceful shutdown
 //
 // Important notes:
-// - The batcher runs a background goroutine that continues indefinitely
+// - The batcher runs a background goroutine managed via context
 // - Items are passed by pointer to avoid unnecessary copying
 // - The processing function is called synchronously or asynchronously based on the background flag
 // - Batches are processed when size is reached, timeout expires, or Trigger() is called
+// - Call Close() for graceful shutdown to process remaining items and prevent goroutine leaks
 //
 // This package is part of the go-batcher library and provides efficient batch processing
-// capabilities for high-throughput applications.
+// capabilities for high-throughput applications with minimal resource consumption.
 package batcher
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -73,6 +84,8 @@ type Batcher[T any] struct {
 	background bool
 	usePool    bool
 	pool       *sync.Pool
+	ctx        context.Context
+	cancelFunc context.CancelFunc
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -101,6 +114,7 @@ type Batcher[T any] struct {
 // - The worker goroutine cannot be stopped once started (runs indefinitely)
 // - Passing background=true is recommended for I/O-bound operations to avoid blocking
 func New[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -110,6 +124,8 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 		triggerCh:  make(chan struct{}),
 		background: background,
 		usePool:    false,
+		ctx:        ctx,
+		cancelFunc: cancel,
 	}
 
 	go b.worker()
@@ -132,6 +148,7 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 // Returns:
 // - *Batcher[T]: A configured and running Batcher instance with pooling enabled
 func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
+	ctx, cancel := context.WithCancel(context.Background())
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -147,6 +164,8 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 				return &slice
 			},
 		},
+		ctx:        ctx,
+		cancelFunc: cancel,
 	}
 
 	go b.worker()
@@ -211,6 +230,36 @@ func (b *Batcher[T]) Trigger() {
 	b.triggerCh <- struct{}{}
 }
 
+// Close gracefully shuts down the batcher, allowing pending items to be processed.
+//
+// This method signals the worker goroutine to stop accepting new items and process
+// any remaining items in the queue before exiting. It provides a clean shutdown
+// mechanism that prevents goroutine leaks and ensures all queued items are flushed.
+//
+// Parameters:
+// - None
+//
+// Returns:
+// - Nothing
+//
+// Side Effects:
+// - Cancels the internal context, signaling the worker to begin shutdown
+// - The worker will process all items currently in the channel
+// - The worker will flush any partial batch before exiting
+// - The internal channel is closed after draining, preventing further Put() calls
+//
+// Notes:
+// - This method returns immediately without waiting for shutdown to complete
+// - It's safe to call Close() multiple times (subsequent calls have no effect)
+// - Items already in the channel will be processed during shutdown
+//
+// IMPORTANT: Do not call Put() after Close() has been called. The channel is closed
+// during shutdown, and any Put() calls after Close() will panic with "send on closed channel".
+// Users must ensure proper synchronization to prevent Put() calls after Close().
+func (b *Batcher[T]) Close() {
+	b.cancelFunc()
+}
+
 // worker is the core processing loop that manages batch aggregation and processing.
 //
 // This function runs as a background goroutine and continuously monitors three conditions
@@ -246,36 +295,60 @@ func (b *Batcher[T]) Trigger() {
 // - Reuses timers to reduce allocations and GC pressure
 // - When usePool=true, manages slice lifecycle through sync.Pool for memory efficiency
 func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
-	// Create a reusable timer for optimization
-	timer := time.NewTimer(b.timeout)
-	defer timer.Stop()
+	var timer *time.Timer
+	var timerCh <-chan time.Time // nil channel blocks forever, enabling lazy timer activation
+
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
 	for {
-		// Reset the timer for this batch cycle
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(b.timeout)
-
-		for {
-			select {
-			case item := <-b.ch:
+		select {
+		case <-b.ctx.Done():
+			// Shutdown: drain channel and process remaining items
+			close(b.ch)
+			for item := range b.ch {
 				b.batch = append(b.batch, item)
+			}
+			// Flush final batch if any
+			if len(b.batch) > 0 {
+				b.fn(b.batch)
+			}
+			return
 
-				if len(b.batch) == b.size {
-					goto saveBatch
+		case item := <-b.ch:
+			b.batch = append(b.batch, item)
+
+			// Start timer on first item (lazy timer activation)
+			if len(b.batch) == 1 {
+				timer = time.NewTimer(b.timeout)
+				timerCh = timer.C
+			}
+
+			// Flush if size limit reached
+			if len(b.batch) == b.size {
+				if timer != nil {
+					timer.Stop()
+					timerCh = nil
 				}
-
-			case <-timer.C:
-				goto saveBatch
-
-			case <-b.triggerCh:
 				goto saveBatch
 			}
+
+		case <-timerCh: // Only fires when timerCh != nil (batch has items)
+			timerCh = nil // Disable timer after firing
+			goto saveBatch
+
+		case <-b.triggerCh:
+			if timer != nil {
+				timer.Stop()
+				timerCh = nil
+			}
+			goto saveBatch
 		}
+
+		continue
 
 	saveBatch:
 		if len(b.batch) > 0 { //nolint:nestif // Necessary complexity for handling pooling and background modes
