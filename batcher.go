@@ -44,7 +44,6 @@
 package batcher
 
 import (
-	"context"
 	"sync"
 	"time"
 )
@@ -84,8 +83,7 @@ type Batcher[T any] struct {
 	background bool
 	usePool    bool
 	pool       *sync.Pool
-	ctx        context.Context
-	cancelFunc context.CancelFunc
+	done       chan struct{}
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -114,7 +112,6 @@ type Batcher[T any] struct {
 // - The worker goroutine cannot be stopped once started (runs indefinitely)
 // - Passing background=true is recommended for I/O-bound operations to avoid blocking
 func New[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
-	ctx, cancel := context.WithCancel(context.Background())
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -124,8 +121,7 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 		triggerCh:  make(chan struct{}),
 		background: background,
 		usePool:    false,
-		ctx:        ctx,
-		cancelFunc: cancel,
+		done:       make(chan struct{}),
 	}
 
 	go b.worker()
@@ -148,7 +144,6 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 // Returns:
 // - *Batcher[T]: A configured and running Batcher instance with pooling enabled
 func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
-	ctx, cancel := context.WithCancel(context.Background())
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -164,8 +159,7 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 				return &slice
 			},
 		},
-		ctx:        ctx,
-		cancelFunc: cancel,
+		done: make(chan struct{}),
 	}
 
 	go b.worker()
@@ -257,7 +251,7 @@ func (b *Batcher[T]) Trigger() {
 // during shutdown, and any Put() calls after Close() will panic with "send on closed channel".
 // Users must ensure proper synchronization to prevent Put() calls after Close().
 func (b *Batcher[T]) Close() {
-	b.cancelFunc()
+	close(b.done)
 }
 
 // worker is the core processing loop that manages batch aggregation and processing.
@@ -306,7 +300,7 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 
 	for {
 		select {
-		case <-b.ctx.Done():
+		case <-b.done:
 			// Shutdown: drain channel and process remaining items
 			close(b.ch)
 			for item := range b.ch {

@@ -1,7 +1,6 @@
 package batcher
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
@@ -676,7 +675,6 @@ type BatcherWithDedup[T comparable] struct { //nolint:revive // Name is clear an
 func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
-	ctx, cancel := context.WithCancel(context.Background())
 	b := &BatcherWithDedup[T]{
 		Batcher: Batcher[T]{
 			fn:         fn,
@@ -687,8 +685,7 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    false,
-			ctx:        ctx,
-			cancelFunc: cancel,
+			done:       make(chan struct{}),
 		},
 		deduplicationWindow: deduplicationWindow,
 		// Create an optimized time-partitioned map with bloom filter
@@ -704,7 +701,6 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
-	ctx, cancel := context.WithCancel(context.Background())
 	b := &BatcherWithDedup[T]{
 		Batcher: Batcher[T]{
 			fn:         fn,
@@ -715,8 +711,7 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    true,
-			ctx:        ctx,
-			cancelFunc: cancel,
+			done:       make(chan struct{}),
 			pool: &sync.Pool{
 				New: func() interface{} {
 					slice := make([]*T, 0, size)
