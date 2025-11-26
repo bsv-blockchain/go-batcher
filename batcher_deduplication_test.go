@@ -981,10 +981,8 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 
 			wg.Wait()
 
-			// Due to timing and bucket transitions, we might have more than one success
-			// but it should be a small number relative to total attempts
-			assert.Positive(t, successCount.Load(), "At least one Set should succeed")
-			assert.LessOrEqual(t, successCount.Load(), int32(5), "Should not have too many successful sets for same key")
+			// With double-checked locking, exactly one Set should succeed
+			assert.Equal(t, int32(1), successCount.Load(), "Exactly one Set should succeed for same key")
 
 			// Key should exist with some value
 			val, exists := m.Get(key)
@@ -993,8 +991,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 			assert.Less(t, val, numGoroutines, "Value should be within expected range")
 
 			count := m.Count()
-			assert.GreaterOrEqual(t, count, 1, "Count should be at least 1 after concurrent sets")
-			assert.LessOrEqual(t, count, 5, "Count should not be too high for same key")
+			assert.Equal(t, 1, count, "Count should be exactly 1 for same key")
 		})
 
 		t.Run("ConcurrentDeleteSameKey", func(t *testing.T) {

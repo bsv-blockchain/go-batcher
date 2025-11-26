@@ -404,22 +404,19 @@ func (m *TimePartitionedMap[K, V]) Get(key K) (V, bool) { //nolint:gocognit // C
 // - The entire add operation is atomic to prevent bucket deletion races
 // - Returns false for duplicates without modifying the map
 // Set adds a key-value pair using bloom filter for fast duplicate detection.
-// The bloom filter provides fast negative lookups for non-duplicate items.
+// Uses double-checked locking pattern for thread safety:
+//  1. First check (outside lock): Bloom filter for fast negative lookups
+//  2. Acquire lock
+//  3. Second check (inside lock): Full verification to prevent TOCTOU race
+//  4. Insert if still no duplicate
 func (m *TimePartitionedMap[K, V]) Set(key K, value V) bool {
-	// Check bloom filter first (fast path for non-duplicates)
-	if !m.bloomFilter.Test(key) {
-		// Definitely not a duplicate, proceed with insertion
-		m.bloomFilter.Add(key)
-	} else {
-		// Bloom filter says maybe - do full check
+	// FIRST CHECK (outside lock): Bloom filter for fast rejection of duplicates
+	if m.bloomFilter.Test(key) {
 		if _, exists := m.Get(key); exists {
 			return false
 		}
-		// Not actually a duplicate, add to bloom filter
-		m.bloomFilter.Add(key)
 	}
 
-	// Proceed with insertion (same as original Set logic)
 	var (
 		bucket *txmap.SyncedMap[K, V]
 		exists bool
@@ -427,7 +424,17 @@ func (m *TimePartitionedMap[K, V]) Set(key K, value V) bool {
 
 	bucketID := m.currentBucketID.Load()
 
-	m.bucketsMu.Lock() // Lock before accessing or modifying m.buckets structure
+	m.bucketsMu.Lock()
+
+	// SECOND CHECK (inside lock): Prevent TOCTOU race condition
+	// Another goroutine may have inserted the key between our first check and lock acquisition
+	if m.keyExistsInBucketsLocked(key) {
+		m.bucketsMu.Unlock()
+		return false
+	}
+
+	// Safe to add - update bloom filter under lock for consistency
+	m.bloomFilter.Add(key)
 
 	// Initialize bucket if it doesn't exist for the current bucketID
 	if bucket, exists = m.buckets.Get(bucketID); !exists {
@@ -445,13 +452,10 @@ func (m *TimePartitionedMap[K, V]) Set(key K, value V) bool {
 	}
 
 	// Add item to the determined bucket and update total item count.
-	// This is now done under the m.bucketsMu lock to prevent a race condition
-	// where the bucket might be removed by cleanupOldBuckets between being
-	// retrieved/created and the item being added to it.
 	bucket.Set(key, value)
 	m.itemCount.Add(1)
 
-	m.bucketsMu.Unlock() // Unlock after all modifications to m.buckets and the specific bucket's content.
+	m.bucketsMu.Unlock()
 
 	return true
 }
@@ -617,6 +621,48 @@ func (m *TimePartitionedMap[K, V]) recalculateOldestBucket() {
 
 	m.oldestBucket.Store(oldest)
 	m.newestBucket.Store(newest)
+}
+
+// keyExistsInBucketsLocked checks if a key exists in any bucket.
+// MUST be called while holding bucketsMu lock.
+func (m *TimePartitionedMap[K, V]) keyExistsInBucketsLocked(key K) bool {
+	newestID := m.newestBucket.Load()
+	oldestID := m.oldestBucket.Load()
+
+	// Fall back to range iteration if bucket tracking not initialized
+	if newestID == 0 || oldestID == 0 {
+		return m.keyExistsInBucketsRange(key)
+	}
+
+	// Search backwards from newest bucket (most likely location for recent duplicates)
+	for bucketID := newestID; bucketID >= oldestID; bucketID-- {
+		if m.keyExistsInBucket(key, bucketID) {
+			return true
+		}
+	}
+	return false
+}
+
+// keyExistsInBucketsRange checks if key exists using range iteration.
+// MUST be called while holding bucketsMu lock.
+func (m *TimePartitionedMap[K, V]) keyExistsInBucketsRange(key K) bool {
+	for _, bucket := range m.buckets.Range() {
+		if _, found := bucket.Get(key); found {
+			return true
+		}
+	}
+	return false
+}
+
+// keyExistsInBucket checks if key exists in a specific bucket.
+// MUST be called while holding bucketsMu lock.
+func (m *TimePartitionedMap[K, V]) keyExistsInBucket(key K, bucketID int64) bool {
+	bucket, exists := m.buckets.Get(bucketID)
+	if !exists {
+		return false
+	}
+	_, found := bucket.Get(key)
+	return found
 }
 
 // Count returns the total number of items across all buckets.
