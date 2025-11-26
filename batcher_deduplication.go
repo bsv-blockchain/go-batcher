@@ -74,65 +74,98 @@ func (bf *BloomFilter) Reset() {
 }
 
 // hash generates multiple hash values for the given key.
+// Note: hash.Hash.Write() never returns an error for FNV hash, but we check defensively.
 func (bf *BloomFilter) hash(key interface{}) []uint64 { //nolint:gocyclo // Type switch for performance
 	h := fnv.New64a()
 	// Convert key to bytes for hashing - fast paths for common types
 	switch k := key.(type) {
 	case string:
-		_, _ = h.Write([]byte(k))
+		if _, err := h.Write([]byte(k)); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case int:
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], uint64(k)) //nolint:gosec // Safe conversion for hashing
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case int8:
-		_, _ = h.Write([]byte{byte(k)})
+		if _, err := h.Write([]byte{byte(k)}); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case int16:
 		var buf [2]byte
 		binary.BigEndian.PutUint16(buf[:], uint16(k)) //nolint:gosec // Safe conversion for hashing
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case int32:
 		var buf [4]byte
 		binary.BigEndian.PutUint32(buf[:], uint32(k)) //nolint:gosec // Safe conversion for hashing
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case int64:
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], uint64(k)) //nolint:gosec // Safe conversion for hashing
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case uint:
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], uint64(k))
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case uint8:
-		_, _ = h.Write([]byte{k})
+		if _, err := h.Write([]byte{k}); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case uint16:
 		var buf [2]byte
 		binary.BigEndian.PutUint16(buf[:], k)
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case uint32:
 		var buf [4]byte
 		binary.BigEndian.PutUint32(buf[:], k)
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case uint64:
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], k)
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case float32:
 		var buf [4]byte
 		binary.BigEndian.PutUint32(buf[:], math.Float32bits(k))
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case float64:
 		var buf [8]byte
 		binary.BigEndian.PutUint64(buf[:], math.Float64bits(k))
-		_, _ = h.Write(buf[:])
+		if _, err := h.Write(buf[:]); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	case bool:
 		if k {
-			_, _ = h.Write([]byte{1})
+			if _, err := h.Write([]byte{1}); err != nil {
+				panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+			}
 		} else {
-			_, _ = h.Write([]byte{0})
+			if _, err := h.Write([]byte{0}); err != nil {
+				panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+			}
 		}
 	default:
 		// For other types (structs, arrays, etc), use fmt.Fprintf for generic conversion
-		_, _ = fmt.Fprintf(h, "%v", key)
+		if _, err := fmt.Fprintf(h, "%v", key); err != nil {
+			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
+		}
 	}
 	hash1 := h.Sum64()
 	// Generate additional hashes using double hashing
