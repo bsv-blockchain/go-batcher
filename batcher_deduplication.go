@@ -74,8 +74,8 @@ func (bf *BloomFilter) Reset() {
 }
 
 // hash generates multiple hash values for the given key.
-// Note: hash.Hash.Write() never returns an error for FNV hash, but we check defensively.
-func (bf *BloomFilter) hash(key interface{}) []uint64 { //nolint:gocyclo // Type switch for performance
+// The hash.Hash.Write() method never returns an error for FNV hash, but we check defensively.
+func (bf *BloomFilter) hash(key interface{}) []uint64 { //nolint:gocyclo,gocognit // Type switch for performance
 	h := fnv.New64a()
 	// Convert key to bytes for hashing - fast paths for common types
 	switch k := key.(type) {
