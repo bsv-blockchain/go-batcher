@@ -1,5 +1,5 @@
-github.com/bsv-blockchain/go-bt/v2 v2.5.2 h1:CIjW+7tvaOSUXlKSrBt0fgJBE/YyOTuHpbPHAFxhFZc=
-github.com/bsv-blockchain/go-bt/v2 v2.5.2/go.mod h1:LA9r0UBe5BOyXxIS8oOGfPVmmvpOoxs0pxkFDHmeTSY=
+github.com/bsv-blockchain/go-bt/v2 v2.5.3 h1:QfVNnlXl4r+Sq+tfG8likv29b85gWcAq6v/IzvytAvY=
+github.com/bsv-blockchain/go-bt/v2 v2.5.3/go.mod h1:IW4ejL7cKDj3qRb+nZppWeu3/RzgLbDzsnzQrPmhUHc=
 github.com/bsv-blockchain/go-tx-map v1.3.1 h1:MDC0fx5AeCtEiaHSaUxgiGrEErF/onl9j0w5KlWcPds=
 github.com/bsv-blockchain/go-tx-map v1.3.1/go.mod h1:MPpiD3/MDe3J45fW8tdu2bOw5gQtgQCWYRKT1kZMCrU=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
