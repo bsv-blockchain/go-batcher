@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1045,7 +1046,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 					switch id % 3 {
 					case 0:
 						// Setter goroutines
-						m.Set(id, "value"+string(rune(id)))
+						m.Set(id, "value"+strconv.Itoa(id))
 					case 1:
 						// Getter goroutines
 						m.Get(id - 1)
@@ -1091,7 +1092,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 				go func(id int) {
 					defer wg.Done()
 
-					key := "cleanup" + string(rune(id))
+					key := "cleanup" + strconv.Itoa(id)
 
 					// Mix of operations during cleanup
 					m.Set(key, true)
@@ -1189,7 +1190,7 @@ func TestTimePartitionedMapConcurrentEdgeCases(t *testing.T) { //nolint:gocognit
 					defer wg.Done()
 
 					for j := 0; j < 20; j++ {
-						key := "data" + string(rune(id)) + "_" + string(rune(j))
+						key := "data" + strconv.Itoa(id) + "_" + strconv.Itoa(j)
 						value := make([]byte, 100) // Some non-trivial data
 						for k := range value {
 							value[k] = byte(k % 256)

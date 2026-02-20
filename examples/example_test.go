@@ -14,6 +14,7 @@
 package main
 
 import (
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -287,7 +288,7 @@ func TestEventProcessorProcessBatch(t *testing.T) {
 				batch := make([]*UserEvent, eventsPerGoroutine)
 				for j := 0; j < eventsPerGoroutine; j++ {
 					batch[j] = &UserEvent{
-						UserID:    "user" + string(rune(goroutineID*eventsPerGoroutine+j)),
+						UserID:    "user" + strconv.Itoa(goroutineID*eventsPerGoroutine+j),
 						EventType: "concurrent_test",
 						Timestamp: time.Now(),
 					}
@@ -394,12 +395,12 @@ func TestEventProcessorThreadSafety(t *testing.T) { //nolint:gocognit // Complex
 				events := make([]*UserEvent, eventsPerBatch)
 				for i := 0; i < eventsPerBatch; i++ {
 					events[i] = &UserEvent{
-						UserID:    "worker" + string(rune(workerID)) + "_event" + string(rune(i)),
+						UserID:    "worker" + strconv.Itoa(workerID) + "_event" + strconv.Itoa(i),
 						EventType: "thread_safety_test",
 						Timestamp: time.Now(),
 						Metadata: map[string]string{
-							"worker_id": string(rune(workerID)),
-							"batch_id":  string(rune(batch)),
+							"worker_id": strconv.Itoa(workerID),
+							"batch_id":  strconv.Itoa(batch),
 						},
 					}
 				}
