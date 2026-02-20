@@ -90,7 +90,7 @@ func (bf *BloomFilter) hash(key interface{}) []uint64 { //nolint:gocyclo,gocogni
 			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
 		}
 	case int8:
-		if _, err := h.Write([]byte{byte(k)}); err != nil {
+		if _, err := h.Write([]byte{byte(k)}); err != nil { //nolint:gosec // Safe: int8 written as raw byte for hashing
 			panic(fmt.Sprintf("unexpected hash.Write error: %v", err))
 		}
 	case int16:
