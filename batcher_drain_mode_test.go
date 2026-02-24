@@ -98,77 +98,81 @@ func TestDrainMode_SingleItem(t *testing.T) {
 	}
 }
 
+type scalingTracker struct {
+	mu         sync.Mutex
+	batchSizes []int
+	totalItems int
+}
+
+func (s *scalingTracker) record(size int) {
+	s.mu.Lock()
+	s.batchSizes = append(s.batchSizes, size)
+	s.totalItems += size
+	s.mu.Unlock()
+}
+
+func (s *scalingTracker) done(target int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.totalItems >= target
+}
+
+func (s *scalingTracker) logStats(t *testing.T) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t.Logf("Processed %d items in %d batches", s.totalItems, len(s.batchSizes))
+
+	if len(s.batchSizes) == 0 {
+		return
+	}
+
+	minSize, maxSize, sum := s.batchSizes[0], s.batchSizes[0], 0
+	for _, sz := range s.batchSizes {
+		sum += sz
+		if sz < minSize {
+			minSize = sz
+		}
+		if sz > maxSize {
+			maxSize = sz
+		}
+	}
+	t.Logf("Batch sizes: min=%d, max=%d, avg=%d", minSize, maxSize, sum/len(s.batchSizes))
+}
+
 // TestDrainMode_ScalingBehavior demonstrates that batch sizes adapt naturally
 // to throughput: more items queued during processing = larger batches.
 func TestDrainMode_ScalingBehavior(t *testing.T) {
 	const batchSize = 1000
+	const totalSend = 5000
 
-	var mu sync.Mutex
-	var batchSizes []int
-	var totalItems int
-
-	processingDelay := 1 * time.Millisecond
-
+	tracker := &scalingTracker{}
 	b := New[int](batchSize, 10*time.Second, func(batch []*int) {
-		mu.Lock()
-		batchSizes = append(batchSizes, len(batch))
-		totalItems += len(batch)
-		mu.Unlock()
-		time.Sleep(processingDelay) // Simulate work — items queue during this time
+		tracker.record(len(batch))
+		time.Sleep(time.Millisecond) // Simulate work — items queue during this time
 	}, false)
 	b.SetDrainMode(true)
 
-	// Send 5000 items as fast as possible
-	const totalSend = 5000
 	for i := range totalSend {
 		v := i
 		b.Put(&v)
 	}
 
-	// Wait for all items to be processed
-	deadline := time.After(10 * time.Second)
-	for {
-		mu.Lock()
-		done := totalItems >= totalSend
-		mu.Unlock()
-		if done {
-			break
-		}
-		select {
-		case <-deadline:
-			mu.Lock()
-			t.Fatalf("timed out: only %d/%d items processed in %d batches", totalItems, totalSend, len(batchSizes))
-			mu.Unlock() //nolint:govet // unreachable but keeps the pattern consistent
-			return
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
+	require.Eventually(t, func() bool {
+		return tracker.done(totalSend)
+	}, 10*time.Second, time.Millisecond)
 
-	mu.Lock()
-	defer mu.Unlock()
+	tracker.logStats(t)
 
-	t.Logf("Processed %d items in %d batches", totalItems, len(batchSizes))
-	if len(batchSizes) > 0 {
-		minSize, maxSize := batchSizes[0], batchSizes[0]
-		sum := 0
-		for _, s := range batchSizes {
-			sum += s
-			if s < minSize {
-				minSize = s
-			}
-			if s > maxSize {
-				maxSize = s
-			}
-		}
-		t.Logf("Batch sizes: min=%d, max=%d, avg=%d", minSize, maxSize, sum/len(batchSizes))
-	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
 
-	// With drain mode, we should see fewer batches than items (batching is working)
-	assert.Less(t, len(batchSizes), totalSend, "drain mode should batch items together")
-	// And batch sizes should adapt — at least some batches > 1
+	assert.Less(t, len(tracker.batchSizes), totalSend, "drain mode should batch items together")
+
 	hasLargeBatch := false
-	for _, s := range batchSizes {
+	for _, s := range tracker.batchSizes {
 		if s > 1 {
 			hasLargeBatch = true
 			break
@@ -223,6 +227,18 @@ func BenchmarkDrainMode_vs_Normal(b *testing.B) {
 	}
 }
 
+func waitForProcessed(b *testing.B, processed *atomic.Int64, target int64) {
+	b.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for processed.Load() < target {
+		if time.Now().After(deadline) {
+			b.Fatalf("timed out: %d/%d processed", processed.Load(), target)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func benchmarkMode(b *testing.B, targetRate int, drain bool) {
 	b.Helper()
 
@@ -234,8 +250,7 @@ func benchmarkMode(b *testing.B, targetRate int, drain bool) {
 		now := time.Now().UnixNano()
 		batchCount.Add(1)
 		for _, item := range batch {
-			latency := now - *item
-			totalLatency.Add(latency)
+			totalLatency.Add(now - *item)
 		}
 		processed.Add(int64(len(batch)))
 	}, false)
@@ -245,33 +260,30 @@ func benchmarkMode(b *testing.B, targetRate int, drain bool) {
 
 	b.ResetTimer()
 
-	// Send b.N items at the target rate
 	interval := time.Second / time.Duration(targetRate)
 	for i := 0; i < b.N; i++ {
 		now := time.Now().UnixNano()
 		bat.Put(&now)
 		if interval > 0 && i%100 == 0 {
-			// Batch sleep to approximate target rate without per-item overhead
 			time.Sleep(interval * 100)
 		}
 	}
 
-	// Wait for all items to be processed
-	deadline := time.Now().Add(30 * time.Second)
-	for processed.Load() < int64(b.N) {
-		if time.Now().After(deadline) {
-			b.Fatalf("timed out: %d/%d processed", processed.Load(), b.N)
-		}
-		time.Sleep(time.Millisecond)
-	}
-
+	waitForProcessed(b, &processed, int64(b.N))
 	b.StopTimer()
+
+	reportBenchMetrics(b, &totalLatency, &batchCount)
+}
+
+func reportBenchMetrics(b *testing.B, totalLatency, batchCount *atomic.Int64) {
+	b.Helper()
 
 	batches := batchCount.Load()
 	avgLatency := time.Duration(0)
 	if b.N > 0 {
 		avgLatency = time.Duration(totalLatency.Load() / int64(b.N))
 	}
+
 	avgBatchSize := 0
 	if batches > 0 {
 		avgBatchSize = b.N / int(batches)
