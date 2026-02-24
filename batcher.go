@@ -84,6 +84,7 @@ type Batcher[T any] struct {
 	usePool    bool
 	pool       *sync.Pool
 	done       chan struct{}
+	drainMode  bool
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -254,6 +255,19 @@ func (b *Batcher[T]) Close() {
 	close(b.done)
 }
 
+// SetDrainMode enables or disables drain mode.
+//
+// When drain mode is enabled, the worker drains all currently-available items
+// from the channel (up to the size cap) and fires immediately — instead of
+// accumulating to the size threshold or waiting for the timeout.
+//
+// This produces adaptive batch sizes that naturally scale with throughput:
+// at low throughput, batches are small (even single-item) with near-zero latency;
+// at high throughput, batches grow larger as more items queue during processing.
+func (b *Batcher[T]) SetDrainMode(enabled bool) {
+	b.drainMode = enabled
+}
+
 // worker is the core processing loop that manages batch aggregation and processing.
 //
 // This function runs as a background goroutine and continuously monitors three conditions
@@ -314,6 +328,19 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 
 		case item := <-b.ch:
 			b.batch = append(b.batch, item)
+
+			if b.drainMode {
+				// Drain all available items up to size cap, then fire immediately
+				for len(b.batch) < b.size {
+					select {
+					case item := <-b.ch:
+						b.batch = append(b.batch, item)
+					default:
+						goto saveBatch
+					}
+				}
+				goto saveBatch
+			}
 
 			// Start timer on first item (lazy timer activation)
 			if len(b.batch) == 1 {
