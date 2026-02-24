@@ -37,44 +37,54 @@ func TestDrainMode_FiresImmediately(t *testing.T) {
 	}
 }
 
-// TestDrainMode_RespectsMaxCap verifies that drain mode caps batches at size.
+// TestDrainMode_RespectsMaxCap verifies that drain mode never exceeds the size cap
+// and processes all items. Exact batch boundaries are not asserted because the worker
+// goroutine may interleave with the producer — particularly under -race — producing
+// more than three batches with different sizes, all of which are valid.
 func TestDrainMode_RespectsMaxCap(t *testing.T) {
-	batchCh := make(chan int, 10)
+	const total = 500
+	const maxSize = 200
 
-	b := New[int](200, 5*time.Second, func(batch []*int) {
-		batchCh <- len(batch)
+	var mu sync.Mutex
+	var batches []int
+
+	b := New[int](maxSize, 5*time.Second, func(batch []*int) {
+		mu.Lock()
+		batches = append(batches, len(batch))
+		mu.Unlock()
 	}, false)
 	b.SetDrainMode(true)
 
-	// Pre-fill channel with 500 items (more than size=200)
-	for i := range 500 {
+	for i := range total {
 		v := i
 		b.Put(&v)
 	}
 
-	// First batch should be exactly 200 (capped)
-	select {
-	case size := <-batchCh:
-		assert.Equal(t, 200, size, "first batch should be capped at 200")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for first batch")
+	// Wait for all items to be processed.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		sum := 0
+		for _, s := range batches {
+			sum += s
+		}
+		return sum >= total
+	}, 5*time.Second, time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Every batch must respect the size cap.
+	for i, s := range batches {
+		assert.LessOrEqual(t, s, maxSize, "batch %d exceeded max size", i)
 	}
 
-	// Second batch should also be 200
-	select {
-	case size := <-batchCh:
-		assert.Equal(t, 200, size, "second batch should be capped at 200")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for second batch")
+	// All items must be accounted for.
+	sum := 0
+	for _, s := range batches {
+		sum += s
 	}
-
-	// Third batch should be remaining 100
-	select {
-	case size := <-batchCh:
-		assert.Equal(t, 100, size, "third batch should be remaining 100")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for third batch")
-	}
+	assert.Equal(t, total, sum, "total items processed should equal %d", total)
 }
 
 // TestDrainMode_SingleItem verifies that a single item fires immediately
