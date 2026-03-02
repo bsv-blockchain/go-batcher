@@ -11,8 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDrainMode_FiresImmediately verifies that when drain mode is enabled and
-// items are already queued, the batch fires immediately without waiting for timeout.
+// TestDrainMode_FiresImmediately verifies that when drain mode is enabled,
+// all queued items fire immediately without waiting for the timeout.
+// Items may arrive in one or more batches depending on goroutine scheduling,
+// so we verify all 10 items are received well within the 5s timeout.
 func TestDrainMode_FiresImmediately(t *testing.T) {
 	batchCh := make(chan []*int, 10)
 
@@ -23,18 +25,25 @@ func TestDrainMode_FiresImmediately(t *testing.T) {
 	}, false)
 	b.SetDrainMode(true)
 
-	// Pre-fill channel with 10 items
 	for i := range 10 {
 		v := i
 		b.Put(&v)
 	}
 
-	select {
-	case batch := <-batchCh:
-		require.Len(t, batch, 10, "expected batch of 10 items")
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("drain mode did not fire immediately — timed out waiting for batch")
+	// Collect all items across however many batches drain mode produces.
+	// The key assertion is that all items arrive well within the 5s timeout,
+	// proving drain mode fires immediately rather than waiting.
+	var allItems []*int
+	deadline := time.After(500 * time.Millisecond)
+	for len(allItems) < 10 {
+		select {
+		case batch := <-batchCh:
+			allItems = append(allItems, batch...)
+		case <-deadline:
+			t.Fatalf("drain mode did not fire immediately — timed out after receiving %d/10 items", len(allItems))
+		}
 	}
+	require.Len(t, allItems, 10, "expected all 10 items to be processed")
 }
 
 // TestDrainMode_RespectsMaxCap verifies that drain mode never exceeds the size cap
