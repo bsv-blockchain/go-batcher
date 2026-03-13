@@ -667,114 +667,108 @@ func TestBatcherResourceCleanup(t *testing.T) { //nolint:gocognit,gocyclo // Com
 	})
 }
 
-// TestSetMaxConcurrent verifies that SetMaxConcurrent limits concurrent background goroutines.
+// trackPeakConcurrency atomically updates the peak concurrency counter.
+func trackPeakConcurrency(current int64, peak *atomic.Int64) {
+	for {
+		p := peak.Load()
+		if current <= p || peak.CompareAndSwap(p, current) {
+			break
+		}
+	}
+}
+
+// TestSetMaxConcurrent_Limits verifies that SetMaxConcurrent caps concurrent background goroutines.
 //
 // This test validates the core OOM-prevention mechanism: when background=true and the batch
 // processing function is slow (e.g., a gRPC call), SetMaxConcurrent prevents unbounded
 // goroutine accumulation by blocking the worker when the limit is reached.
-//
-// Test coverage includes:
-// - Peak concurrent goroutines never exceeds the configured limit
-// - All items are still processed (no data loss)
-// - Backpressure works correctly (worker blocks when limit reached)
-// - Zero value means no limit (original behavior preserved)
-func TestSetMaxConcurrent(t *testing.T) {
-	t.Run("limits concurrent background goroutines", func(t *testing.T) {
-		const maxConcurrent = 3
-		const totalBatches = 20
+func TestSetMaxConcurrent_Limits(t *testing.T) {
+	const maxConcurrent = 3
+	const totalBatches = 20
 
-		var concurrent atomic.Int64
-		var peakConcurrent atomic.Int64
-		var processedBatches atomic.Int64
+	var concurrent atomic.Int64
+	var peakConcurrent atomic.Int64
+	var processedBatches atomic.Int64
 
-		b := New[batchStoreItem](1, 50*time.Millisecond, func(batch []*batchStoreItem) {
-			cur := concurrent.Add(1)
-			// Track peak concurrency
-			for {
-				peak := peakConcurrent.Load()
-				if cur <= peak || peakConcurrent.CompareAndSwap(peak, cur) {
-					break
-				}
-			}
+	b := New[batchStoreItem](1, 50*time.Millisecond, func(_ []*batchStoreItem) {
+		cur := concurrent.Add(1)
+		trackPeakConcurrency(cur, &peakConcurrent)
 
-			// Simulate slow processing (e.g., gRPC call)
-			time.Sleep(50 * time.Millisecond)
+		// Simulate slow processing (e.g., gRPC call)
+		time.Sleep(50 * time.Millisecond)
 
-			concurrent.Add(-1)
-			processedBatches.Add(1)
-		}, true)
-		b.SetMaxConcurrent(maxConcurrent)
+		concurrent.Add(-1)
+		processedBatches.Add(1)
+	}, true)
+	b.SetMaxConcurrent(maxConcurrent)
 
-		// Send items rapidly to trigger many batches
-		for i := 0; i < totalBatches; i++ {
-			item := &batchStoreItem{}
-			b.Put(item)
-		}
-
-		// Wait for all batches to complete
-		require.Eventually(t, func() bool {
-			return processedBatches.Load() >= int64(totalBatches)
-		}, 10*time.Second, 10*time.Millisecond, "All batches should be processed")
-
-		b.Close()
-
-		// Verify peak concurrency was bounded
-		peak := peakConcurrent.Load()
-		assert.LessOrEqual(t, peak, int64(maxConcurrent),
-			"Peak concurrent goroutines (%d) should not exceed maxConcurrent (%d)", peak, maxConcurrent)
-		assert.Greater(t, peak, int64(0), "Should have had some concurrency")
-
-		// Verify all items were processed
-		assert.Equal(t, int64(totalBatches), processedBatches.Load(),
-			"All batches should be processed")
-	})
-
-	t.Run("zero means no limit", func(t *testing.T) {
-		var processedBatches atomic.Int64
-
-		b := New[batchStoreItem](1, 50*time.Millisecond, func(batch []*batchStoreItem) {
-			time.Sleep(10 * time.Millisecond)
-			processedBatches.Add(1)
-		}, true)
-		b.SetMaxConcurrent(0) // Should be a no-op
-
-		assert.Nil(t, b.sem, "Semaphore should not be created for maxConcurrent=0")
-
-		for i := 0; i < 5; i++ {
-			b.Put(&batchStoreItem{})
-		}
-
-		require.Eventually(t, func() bool {
-			return processedBatches.Load() >= 5
-		}, 5*time.Second, 10*time.Millisecond)
-
-		b.Close()
-	})
-
-	t.Run("close while blocked on semaphore", func(t *testing.T) {
-		// Set maxConcurrent=1 and have a very slow batch function
-		// so the worker blocks on semaphore, then close
-		var started atomic.Int64
-		var done atomic.Int64
-
-		b := New[batchStoreItem](1, 50*time.Millisecond, func(batch []*batchStoreItem) {
-			started.Add(1)
-			time.Sleep(500 * time.Millisecond)
-			done.Add(1)
-		}, true)
-		b.SetMaxConcurrent(1)
-
-		// First item occupies the semaphore
+	// Send items rapidly to trigger many batches
+	for i := 0; i < totalBatches; i++ {
 		b.Put(&batchStoreItem{})
-		time.Sleep(20 * time.Millisecond) // Let it start processing
+	}
 
-		// Second item will block on semaphore
+	// Wait for all batches to complete
+	require.Eventually(t, func() bool {
+		return processedBatches.Load() >= int64(totalBatches)
+	}, 10*time.Second, 10*time.Millisecond, "All batches should be processed")
+
+	b.Close()
+
+	// Verify peak concurrency was bounded
+	peak := peakConcurrent.Load()
+	assert.LessOrEqual(t, peak, int64(maxConcurrent),
+		"Peak concurrent goroutines (%d) should not exceed maxConcurrent (%d)", peak, maxConcurrent)
+	assert.Positive(t, peak, "Should have had some concurrency")
+
+	// Verify all items were processed
+	assert.Equal(t, int64(totalBatches), processedBatches.Load(),
+		"All batches should be processed")
+}
+
+// TestSetMaxConcurrent_ZeroNoLimit verifies that SetMaxConcurrent(0) preserves original behavior.
+func TestSetMaxConcurrent_ZeroNoLimit(t *testing.T) {
+	var processedBatches atomic.Int64
+
+	b := New[batchStoreItem](1, 50*time.Millisecond, func(_ []*batchStoreItem) {
+		time.Sleep(10 * time.Millisecond)
+		processedBatches.Add(1)
+	}, true)
+	b.SetMaxConcurrent(0) // Should be a no-op
+
+	assert.Nil(t, b.sem, "Semaphore should not be created for maxConcurrent=0")
+
+	for i := 0; i < 5; i++ {
 		b.Put(&batchStoreItem{})
-		time.Sleep(20 * time.Millisecond)
+	}
 
-		// Close should unblock the worker via the done channel
-		require.NotPanics(t, func() {
-			b.Close()
-		}, "Close should not panic when worker is blocked on semaphore")
-	})
+	require.Eventually(t, func() bool {
+		return processedBatches.Load() >= 5
+	}, 5*time.Second, 10*time.Millisecond)
+
+	b.Close()
+}
+
+// TestSetMaxConcurrent_CloseWhileBlocked verifies graceful shutdown when the worker
+// is blocked waiting for a semaphore slot.
+func TestSetMaxConcurrent_CloseWhileBlocked(t *testing.T) {
+	var started atomic.Int64
+
+	b := New[batchStoreItem](1, 50*time.Millisecond, func(_ []*batchStoreItem) {
+		started.Add(1)
+		time.Sleep(500 * time.Millisecond)
+	}, true)
+	b.SetMaxConcurrent(1)
+
+	// First item occupies the semaphore
+	b.Put(&batchStoreItem{})
+	time.Sleep(20 * time.Millisecond) // Let it start processing
+
+	// Second item will block on semaphore
+	b.Put(&batchStoreItem{})
+	time.Sleep(20 * time.Millisecond)
+
+	// Close should unblock the worker via the done channel
+	require.NotPanics(t, func() {
+		b.Close()
+	}, "Close should not panic when worker is blocked on semaphore")
 }
