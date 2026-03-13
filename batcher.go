@@ -75,17 +75,19 @@ import (
 // - Items are passed by pointer to avoid copying
 // - The internal worker goroutine runs indefinitely
 type Batcher[T any] struct {
-	fn         func([]*T)
-	size       int
-	timeout    time.Duration
-	batch      []*T
-	ch         chan *T
-	triggerCh  chan struct{}
-	background bool
-	usePool    bool
-	pool       *sync.Pool
-	done       chan struct{}
-	drainMode  atomic.Bool
+	fn            func([]*T)
+	size          int
+	timeout       time.Duration
+	batch         []*T
+	ch            chan *T
+	triggerCh     chan struct{}
+	background    bool
+	usePool       bool
+	pool          *sync.Pool
+	done          chan struct{}
+	drainMode     atomic.Bool
+	maxConcurrent int
+	sem           chan struct{}
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -269,6 +271,24 @@ func (b *Batcher[T]) SetDrainMode(enabled bool) {
 	b.drainMode.Store(enabled)
 }
 
+// SetMaxConcurrent limits the number of concurrent in-flight background batch
+// processing goroutines. When the limit is reached, the worker blocks until a
+// slot is available, which naturally applies backpressure through the channel.
+//
+// This prevents unbounded goroutine accumulation when the batch processing
+// function (e.g., a gRPC call) is slower than the incoming item rate. Without
+// this limit, background=true causes the worker to spawn unlimited goroutines
+// that can exhaust memory.
+//
+// A value of 0 (default) means no limit (original behavior).
+// Must be called before items are added to the batcher.
+func (b *Batcher[T]) SetMaxConcurrent(n int) {
+	if n > 0 {
+		b.maxConcurrent = n
+		b.sem = make(chan struct{}, n)
+	}
+}
+
 // worker is the core processing loop that manages batch aggregation and processing.
 //
 // This function runs as a background goroutine and continuously monitors three conditions
@@ -377,15 +397,40 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			batch := b.batch
 
 			if b.background {
+				// Acquire semaphore slot if max concurrent is set.
+				// This blocks the worker, causing the channel to fill and
+				// Put() to block, providing natural backpressure.
+				if b.sem != nil {
+					select {
+					case b.sem <- struct{}{}:
+					case <-b.done:
+						// Shutdown while waiting for semaphore — process synchronously
+						b.fn(batch)
+						return
+					}
+				}
+
 				if b.usePool {
 					go func(batch []*T) {
+						defer func() {
+							if b.sem != nil {
+								<-b.sem
+							}
+						}()
 						b.fn(batch)
 						// Return the slice to the pool after processing
 						slice := batch[:0]
 						b.pool.Put(&slice)
 					}(batch)
 				} else {
-					go b.fn(batch)
+					go func(batch []*T) {
+						defer func() {
+							if b.sem != nil {
+								<-b.sem
+							}
+						}()
+						b.fn(batch)
+					}(batch)
 				}
 			} else {
 				b.fn(batch)
