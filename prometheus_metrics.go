@@ -7,15 +7,19 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// MetricsBucketsMicroSeconds mirrors teranode's util.MetricsBucketsMicroSeconds
+// metricsBucketsMicroSeconds mirrors teranode's util.MetricsBucketsMicroSeconds
 // so histograms align across services.
-var MetricsBucketsMicroSeconds = []float64{
+//
+//nolint:gochecknoglobals // Histogram bucket schedule, identical to teranode's util/metrics.go.
+var metricsBucketsMicroSeconds = []float64{
 	0.000005, 0.00001, 0.000025, 0.00005, 0.0001, 0.00025, 0.0005, 0.001,
 	0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
 }
 
-// MetricsBucketsMilliSeconds mirrors teranode's util.MetricsBucketsMilliSeconds.
-var MetricsBucketsMilliSeconds = []float64{
+// metricsBucketsMilliSeconds mirrors teranode's util.MetricsBucketsMilliSeconds.
+//
+//nolint:gochecknoglobals // Histogram bucket schedule, identical to teranode's util/metrics.go.
+var metricsBucketsMilliSeconds = []float64{
 	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 4,
 }
 
@@ -58,7 +62,7 @@ func NewPrometheusMetrics(reg prometheus.Registerer, namespace, subsystem string
 			Subsystem: subsystem,
 			Name:      "enqueue_blocked_seconds",
 			Help:      "Seconds a Put spent blocked when the channel was full.",
-			Buckets:   MetricsBucketsMicroSeconds,
+			Buckets:   metricsBucketsMicroSeconds,
 		}, []string{"batcher"}),
 		batches: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -78,14 +82,14 @@ func NewPrometheusMetrics(reg prometheus.Registerer, namespace, subsystem string
 			Subsystem: subsystem,
 			Name:      "batch_duration_seconds",
 			Help:      "Duration of the user batch-processing function.",
-			Buckets:   MetricsBucketsMilliSeconds,
+			Buckets:   metricsBucketsMilliSeconds,
 		}, []string{"batcher"}),
 		backpressureWait: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "backpressure_wait_seconds",
 			Help:      "Time the worker waited for a SetMaxConcurrent semaphore slot.",
-			Buckets:   MetricsBucketsMilliSeconds,
+			Buckets:   metricsBucketsMilliSeconds,
 		}, []string{"batcher"}),
 		dedup: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -102,7 +106,9 @@ func NewPrometheusMetrics(reg prometheus.Registerer, namespace, subsystem string
 	}
 }
 
-func (m *prometheusMetrics) Bind(name string) BatcherMetrics {
+// Bind resolves all label values for the given batcher name and returns a
+// BoundMetrics with concrete Prometheus metric handles cached.
+func (m *prometheusMetrics) Bind(name string) BoundMetrics {
 	return &boundPrometheusMetrics{
 		enqueued:            m.enqueued.WithLabelValues(name),
 		enqueueBlocked:      m.enqueueBlocked.WithLabelValues(name),
@@ -136,12 +142,19 @@ type boundPrometheusMetrics struct {
 	dedupMiss           prometheus.Counter
 }
 
-func (b *boundPrometheusMetrics) Enqueued()                        { b.enqueued.Inc() }
-func (b *boundPrometheusMetrics) EnqueueBlocked(d time.Duration)   { b.enqueueBlocked.Observe(d.Seconds()) }
-func (b *boundPrometheusMetrics) BackpressureWait(d time.Duration) { b.backpressureWait.Observe(d.Seconds()) }
-func (b *boundPrometheusMetrics) DedupHit()                        { b.dedupHit.Inc() }
-func (b *boundPrometheusMetrics) DedupMiss()                       { b.dedupMiss.Inc() }
-func (b *boundPrometheusMetrics) PanicRecovered()                  { b.panics.Inc() }
+func (b *boundPrometheusMetrics) Enqueued() { b.enqueued.Inc() }
+
+func (b *boundPrometheusMetrics) EnqueueBlocked(d time.Duration) {
+	b.enqueueBlocked.Observe(d.Seconds())
+}
+
+func (b *boundPrometheusMetrics) BackpressureWait(d time.Duration) {
+	b.backpressureWait.Observe(d.Seconds())
+}
+
+func (b *boundPrometheusMetrics) DedupHit()       { b.dedupHit.Inc() }
+func (b *boundPrometheusMetrics) DedupMiss()      { b.dedupMiss.Inc() }
+func (b *boundPrometheusMetrics) PanicRecovered() { b.panics.Inc() }
 
 func (b *boundPrometheusMetrics) BatchTriggered(reason string) {
 	switch reason {

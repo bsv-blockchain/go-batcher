@@ -18,12 +18,12 @@ import (
 // --- Mock metrics ---------------------------------------------------------
 
 type mockMetrics struct {
-	bound *mockBatcherMetrics
+	bound *mockBoundMetrics
 }
 
-func (m *mockMetrics) Bind(string) BatcherMetrics { return m.bound }
+func (m *mockMetrics) Bind(string) BoundMetrics { return m.bound }
 
-type mockBatcherMetrics struct {
+type mockBoundMetrics struct {
 	mu                sync.Mutex
 	enqueued          int
 	enqueueBlocked    int
@@ -37,48 +37,55 @@ type mockBatcherMetrics struct {
 	panicRecovered    int
 }
 
-func newMockBatcherMetrics() *mockBatcherMetrics {
-	return &mockBatcherMetrics{batchesByReason: map[string]int{}}
+func newMockBoundMetrics() *mockBoundMetrics {
+	return &mockBoundMetrics{batchesByReason: map[string]int{}}
 }
 
-func (m *mockBatcherMetrics) Enqueued() {
+func (m *mockBoundMetrics) Enqueued() {
 	m.mu.Lock()
 	m.enqueued++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) EnqueueBlocked(time.Duration) {
+
+func (m *mockBoundMetrics) EnqueueBlocked(time.Duration) {
 	m.mu.Lock()
 	m.enqueueBlocked++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) BatchTriggered(reason string) {
+
+func (m *mockBoundMetrics) BatchTriggered(reason string) {
 	m.mu.Lock()
 	m.batchesByReason[reason]++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) BatchProcessed(size int, d time.Duration) {
+
+func (m *mockBoundMetrics) BatchProcessed(size int, d time.Duration) {
 	m.mu.Lock()
 	m.batchProcessed++
 	m.totalBatchSize += size
 	m.totalBatchSeconds += d.Seconds()
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) BackpressureWait(time.Duration) {
+
+func (m *mockBoundMetrics) BackpressureWait(time.Duration) {
 	m.mu.Lock()
 	m.backpressureWait++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) DedupHit() {
+
+func (m *mockBoundMetrics) DedupHit() {
 	m.mu.Lock()
 	m.dedupHit++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) DedupMiss() {
+
+func (m *mockBoundMetrics) DedupMiss() {
 	m.mu.Lock()
 	m.dedupMiss++
 	m.mu.Unlock()
 }
-func (m *mockBatcherMetrics) PanicRecovered() {
+
+func (m *mockBoundMetrics) PanicRecovered() {
 	m.mu.Lock()
 	m.panicRecovered++
 	m.mu.Unlock()
@@ -99,7 +106,7 @@ type metricsSnapshot struct {
 // snapshot returns a copy of the counters under lock so assertions don't race
 // with worker goroutines that may still be reporting. (We can't simply copy
 // the struct because it embeds a sync.Mutex.)
-func (m *mockBatcherMetrics) snapshot() metricsSnapshot {
+func (m *mockBoundMetrics) snapshot() metricsSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	reasons := make(map[string]int, len(m.batchesByReason))
@@ -129,11 +136,12 @@ type mockLogger struct {
 func (l *mockLogger) Debugf(string, ...any) {}
 func (l *mockLogger) Infof(string, ...any)  {}
 func (l *mockLogger) Warnf(string, ...any)  {}
-func (l *mockLogger) Errorf(format string, args ...any) {
+func (l *mockLogger) Errorf(format string, _ ...any) {
 	l.mu.Lock()
 	l.errors = append(l.errors, format)
 	l.mu.Unlock()
 }
+
 func (l *mockLogger) errorCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -144,6 +152,7 @@ func (l *mockLogger) errorCount() int {
 
 type recordingTracer struct {
 	embedded.Tracer
+
 	mu    sync.Mutex
 	spans []*recordingSpan
 }
@@ -172,6 +181,7 @@ func (t *recordingTracer) snapshot() []*recordingSpan {
 
 type recordingSpan struct {
 	embedded.Span
+
 	tracer     *recordingTracer
 	name       string
 	attributes []attribute.KeyValue
@@ -182,32 +192,33 @@ type recordingSpan struct {
 	ended      atomic.Bool
 }
 
-func (s *recordingSpan) End(...trace.SpanEndOption)                  { s.ended.Store(true) }
-func (s *recordingSpan) AddEvent(string, ...trace.EventOption)       {}
-func (s *recordingSpan) AddLink(trace.Link)                          {}
-func (s *recordingSpan) IsRecording() bool                           { return true }
-func (s *recordingSpan) RecordError(error, ...trace.EventOption)     { s.errored.Store(true) }
-func (s *recordingSpan) SpanContext() trace.SpanContext              { return trace.SpanContext{} }
-func (s *recordingSpan) SetStatus(c codes.Code, d string)            { s.statusCode = c; s.statusDesc = d }
-func (s *recordingSpan) SetName(string)                              {}
-func (s *recordingSpan) SetAttributes(kv ...attribute.KeyValue)      { s.attributes = append(s.attributes, kv...) }
-func (s *recordingSpan) TracerProvider() trace.TracerProvider        { return nil }
+func (s *recordingSpan) End(...trace.SpanEndOption)              { s.ended.Store(true) }
+func (s *recordingSpan) AddEvent(string, ...trace.EventOption)   {}
+func (s *recordingSpan) AddLink(trace.Link)                      {}
+func (s *recordingSpan) IsRecording() bool                       { return true }
+func (s *recordingSpan) RecordError(error, ...trace.EventOption) { s.errored.Store(true) }
+func (s *recordingSpan) SpanContext() trace.SpanContext          { return trace.SpanContext{} }
+func (s *recordingSpan) SetStatus(c codes.Code, d string)        { s.statusCode = c; s.statusDesc = d }
+func (s *recordingSpan) SetName(string)                          {}
+func (s *recordingSpan) SetAttributes(kv ...attribute.KeyValue) {
+	s.attributes = append(s.attributes, kv...)
+}
+func (s *recordingSpan) TracerProvider() trace.TracerProvider { return nil }
 
 // --- Tests ----------------------------------------------------------------
 
-func newTestSetup(t *testing.T, size int, timeout time.Duration, fn func([]*int), background bool, extraOpts ...Option) (*Batcher[int], *mockBatcherMetrics, *recordingTracer, *mockLogger) {
+func newTestSetup(t *testing.T, size int, timeout time.Duration, fn func([]*int), background bool) (*Batcher[int], *mockBoundMetrics, *recordingTracer, *mockLogger) {
 	t.Helper()
-	bm := newMockBatcherMetrics()
+	bm := newMockBoundMetrics()
 	mm := &mockMetrics{bound: bm}
 	tr := &recordingTracer{}
 	lg := &mockLogger{}
-	opts := append([]Option{
+	b := New(size, timeout, fn, background,
 		WithName("testbatcher"),
 		WithMetrics(mm),
 		WithTracer(tr),
 		WithLogger(lg),
-	}, extraOpts...)
-	b := New(size, timeout, fn, background, opts...)
+	)
 	return b, bm, tr, lg
 }
 
@@ -321,7 +332,7 @@ func TestShutdownDrainReason(t *testing.T) {
 
 func TestPanicRecovery(t *testing.T) {
 	calls := atomic.Int32{}
-	b, bm, tr, lg := newTestSetup(t, 1, time.Hour, func(batch []*int) {
+	b, bm, tr, lg := newTestSetup(t, 1, time.Hour, func(_ []*int) {
 		n := calls.Add(1)
 		if n == 1 {
 			panic("boom")
@@ -353,7 +364,7 @@ func TestPanicRecovery(t *testing.T) {
 
 func TestPutCtxAttachesSpanLink(t *testing.T) {
 	processed := make(chan struct{}, 4)
-	b, _, tr, _ := newTestSetup(t, 1, time.Hour, func(batch []*int) {
+	b, _, tr, _ := newTestSetup(t, 1, time.Hour, func(_ []*int) {
 		processed <- struct{}{}
 	}, false)
 	defer b.Close()
@@ -402,7 +413,7 @@ func TestPutCtxAttachesSpanLink(t *testing.T) {
 
 func TestBackpressureWaitMetric(t *testing.T) {
 	release := make(chan struct{})
-	b, bm, _, _ := newTestSetup(t, 1, time.Hour, func(batch []*int) {
+	b, bm, _, _ := newTestSetup(t, 1, time.Hour, func(_ []*int) {
 		<-release // hold the goroutine to force the next batch to wait on the semaphore
 	}, true)
 	b.SetMaxConcurrent(1)
@@ -424,7 +435,7 @@ func TestBackpressureWaitMetric(t *testing.T) {
 }
 
 func TestDedupMetrics(t *testing.T) {
-	bm := newMockBatcherMetrics()
+	bm := newMockBoundMetrics()
 	mm := &mockMetrics{bound: bm}
 
 	processed := make(chan []*int, 4)

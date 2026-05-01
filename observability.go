@@ -19,18 +19,18 @@ type Logger interface {
 
 // Metrics is the provider that mints per-batcher metric views. Bind is called
 // once per Batcher construction with the batcher's name; the returned
-// BatcherMetrics has all label values pre-resolved so the hot path never
+// BoundMetrics has all label values pre-resolved so the hot path never
 // allocates strings or looks up labels.
 //
 // A single Metrics provider can be shared across many Batcher instances in the
 // same service — the per-batcher distinguishing label is resolved by Bind.
 type Metrics interface {
-	Bind(name string) BatcherMetrics
+	Bind(name string) BoundMetrics
 }
 
-// BatcherMetrics is the per-batcher hot-path interface. All implementations
+// BoundMetrics is the per-batcher hot-path interface. All implementations
 // should be allocation-free.
-type BatcherMetrics interface {
+type BoundMetrics interface {
 	// Enqueued is called once per Put / PutCtx.
 	Enqueued()
 	// EnqueueBlocked is called when a Put had to block waiting for channel
@@ -71,7 +71,7 @@ type Option func(*config)
 type config struct {
 	logger       Logger
 	metrics      Metrics // raw, may be nil; resolved into metricsBound by applyOptions
-	metricsBound BatcherMetrics
+	metricsBound BoundMetrics
 	tracer       trace.Tracer
 	name         string
 }
@@ -79,7 +79,7 @@ type config struct {
 func defaultConfig() *config {
 	return &config{
 		logger:       nopLogger{},
-		metricsBound: nopBatcherMetrics{},
+		metricsBound: nopBoundMetrics{},
 		tracer:       noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher"),
 		name:         "batcher",
 	}
@@ -87,7 +87,7 @@ func defaultConfig() *config {
 
 // applyOptions resolves a final config from the variadic options. It binds
 // the Metrics provider (if any) to the resolved name so the runtime config
-// holds only the pre-bound BatcherMetrics view.
+// holds only the pre-bound BoundMetrics view.
 func applyOptions(opts []Option) *config {
 	c := defaultConfig()
 	for _, o := range opts {
@@ -113,7 +113,7 @@ func WithLogger(l Logger) Option {
 }
 
 // WithMetrics attaches a Metrics provider. The provider's Bind(name) is
-// invoked once during construction; the returned BatcherMetrics is what the
+// invoked once during construction; the returned BoundMetrics is what the
 // hot path calls. Passing nil leaves metrics disabled.
 func WithMetrics(m Metrics) Option {
 	return func(c *config) {
@@ -155,17 +155,13 @@ func (nopLogger) Infof(string, ...any)  {}
 func (nopLogger) Warnf(string, ...any)  {}
 func (nopLogger) Errorf(string, ...any) {}
 
-type nopMetrics struct{}
+type nopBoundMetrics struct{}
 
-func (nopMetrics) Bind(string) BatcherMetrics { return nopBatcherMetrics{} }
-
-type nopBatcherMetrics struct{}
-
-func (nopBatcherMetrics) Enqueued()                         {}
-func (nopBatcherMetrics) EnqueueBlocked(time.Duration)      {}
-func (nopBatcherMetrics) BatchTriggered(string)             {}
-func (nopBatcherMetrics) BatchProcessed(int, time.Duration) {}
-func (nopBatcherMetrics) BackpressureWait(time.Duration)    {}
-func (nopBatcherMetrics) DedupHit()                         {}
-func (nopBatcherMetrics) DedupMiss()                        {}
-func (nopBatcherMetrics) PanicRecovered()                   {}
+func (nopBoundMetrics) Enqueued()                         {}
+func (nopBoundMetrics) EnqueueBlocked(time.Duration)      {}
+func (nopBoundMetrics) BatchTriggered(string)             {}
+func (nopBoundMetrics) BatchProcessed(int, time.Duration) {}
+func (nopBoundMetrics) BackpressureWait(time.Duration)    {}
+func (nopBoundMetrics) DedupHit()                         {}
+func (nopBoundMetrics) DedupMiss()                        {}
+func (nopBoundMetrics) PanicRecovered()                   {}

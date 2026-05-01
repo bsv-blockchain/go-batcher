@@ -6,9 +6,12 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const floatEpsilon = 1e-9
 
 // gatherText returns the names of registered metric families, useful for
 // substring assertions about which series are present.
@@ -24,9 +27,10 @@ func gatherText(t *testing.T, reg *prometheus.Registry) string {
 	return sb.String()
 }
 
-// counterValue returns the value of a counter series identified by metric
-// name and label/value pairs. Returns -1 if the series is not present.
-func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) float64 {
+// findMetric locates the dto.Metric within the registry that has the given
+// metric-family name and matches every label/value pair. Returns nil if
+// not found.
+func findMetric(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) *dto.Metric {
 	t.Helper()
 	require.Zero(t, len(labelKV)%2, "labelKV must be key/value pairs")
 	mfs, err := reg.Gather()
@@ -35,52 +39,47 @@ func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV .
 		if mf.GetName() != name {
 			continue
 		}
-	NEXT:
-		for _, m := range mf.Metric {
-			labels := map[string]string{}
-			for _, lp := range m.Label {
-				labels[lp.GetName()] = lp.GetValue()
-			}
-			for i := 0; i < len(labelKV); i += 2 {
-				if labels[labelKV[i]] != labelKV[i+1] {
-					continue NEXT
-				}
-			}
-			if c := m.GetCounter(); c != nil {
-				return c.GetValue()
+		for _, m := range mf.GetMetric() {
+			if metricLabelsMatch(m, labelKV) {
+				return m
 			}
 		}
 	}
-	return -1
+	return nil
+}
+
+func metricLabelsMatch(m *dto.Metric, labelKV []string) bool {
+	labels := map[string]string{}
+	for _, lp := range m.GetLabel() {
+		labels[lp.GetName()] = lp.GetValue()
+	}
+	for i := 0; i < len(labelKV); i += 2 {
+		if labels[labelKV[i]] != labelKV[i+1] {
+			return false
+		}
+	}
+	return true
+}
+
+// counterValue returns the value of a counter series identified by metric
+// name and label/value pairs. Returns -1 if the series is not present.
+func counterValue(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) float64 {
+	t.Helper()
+	m := findMetric(t, reg, name, labelKV...)
+	if m == nil || m.GetCounter() == nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
 }
 
 // histogramSampleCount returns the sample count of a histogram series.
 func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) uint64 {
 	t.Helper()
-	require.Zero(t, len(labelKV)%2)
-	mfs, err := reg.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != name {
-			continue
-		}
-	NEXT:
-		for _, m := range mf.Metric {
-			labels := map[string]string{}
-			for _, lp := range m.Label {
-				labels[lp.GetName()] = lp.GetValue()
-			}
-			for i := 0; i < len(labelKV); i += 2 {
-				if labels[labelKV[i]] != labelKV[i+1] {
-					continue NEXT
-				}
-			}
-			if h := m.GetHistogram(); h != nil {
-				return h.GetSampleCount()
-			}
-		}
+	m := findMetric(t, reg, name, labelKV...)
+	if m == nil || m.GetHistogram() == nil {
+		return 0
 	}
-	return 0
+	return m.GetHistogram().GetSampleCount()
 }
 
 func TestPrometheusMetricsRegistersAllSeries(t *testing.T) {
@@ -124,8 +123,8 @@ func TestPrometheusMetricsRecordsBatcherActivity(t *testing.T) {
 		return counterValue(t, reg, "test_batch_enqueued_total", "batcher", "alpha") == 3
 	}, time.Second, 10*time.Millisecond)
 
-	assert.Equal(t, float64(1), counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonSize))
-	assert.Equal(t, float64(0), counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonTimeout))
+	assert.InDelta(t, 1, counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonSize), floatEpsilon)
+	assert.InDelta(t, 0, counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonTimeout), floatEpsilon)
 	require.Eventually(t, func() bool {
 		return histogramSampleCount(t, reg, "test_batch_batch_size", "batcher", "alpha") == 1 &&
 			histogramSampleCount(t, reg, "test_batch_batch_duration_seconds", "batcher", "alpha") == 1
@@ -156,29 +155,33 @@ func TestPrometheusMetricsSharedAcrossBatchers(t *testing.T) {
 			counterValue(t, reg, "svc_batcher_enqueued_total", "batcher", "beta") == 2
 	}, time.Second, 10*time.Millisecond)
 
-	// Both batchers should appear as distinct series under the same metric.
+	assert.True(t, hasBatcherLabel(t, reg, "svc_batcher_enqueued_total", "alpha"), "alpha series missing")
+	assert.True(t, hasBatcherLabel(t, reg, "svc_batcher_enqueued_total", "beta"), "beta series missing")
+}
+
+// hasBatcherLabel returns true if the gathered metric family with the given
+// name contains a series whose `batcher` label equals want.
+func hasBatcherLabel(t *testing.T, reg *prometheus.Registry, name, want string) bool {
+	t.Helper()
 	mfs, err := reg.Gather()
 	require.NoError(t, err)
-	var sawAlpha, sawBeta bool
 	for _, mf := range mfs {
-		if mf.GetName() != "svc_batcher_enqueued_total" {
-			continue
+		if mf.GetName() == name && familyHasLabel(mf, "batcher", want) {
+			return true
 		}
-		for _, mm := range mf.Metric {
-			for _, lp := range mm.Label {
-				if lp.GetName() == "batcher" {
-					switch lp.GetValue() {
-					case "alpha":
-						sawAlpha = true
-					case "beta":
-						sawBeta = true
-					}
-				}
+	}
+	return false
+}
+
+func familyHasLabel(mf *dto.MetricFamily, key, want string) bool {
+	for _, mm := range mf.GetMetric() {
+		for _, lp := range mm.GetLabel() {
+			if lp.GetName() == key && lp.GetValue() == want {
+				return true
 			}
 		}
 	}
-	assert.True(t, sawAlpha, "alpha series missing")
-	assert.True(t, sawBeta, "beta series missing")
+	return false
 }
 
 func TestPrometheusDedupCounters(t *testing.T) {
@@ -186,7 +189,7 @@ func TestPrometheusDedupCounters(t *testing.T) {
 	m := NewPrometheusMetrics(reg, "svc", "batcher")
 
 	processed := make(chan struct{}, 4)
-	b := NewWithDeduplication[int](10, 50*time.Millisecond, func(batch []*int) {
+	b := NewWithDeduplication[int](10, 50*time.Millisecond, func(_ []*int) {
 		processed <- struct{}{}
 	}, false, WithName("dedup"), WithMetrics(m))
 	defer b.Close()
