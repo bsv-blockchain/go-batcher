@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bsv-blockchain/go-batcher"
+	"github.com/bsv-blockchain/go-batcher/v2"
 )
 
 // ExampleNew demonstrates creating a basic batcher for processing items in groups.

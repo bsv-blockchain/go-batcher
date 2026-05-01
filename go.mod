@@ -1,4 +1,4 @@
-module github.com/bsv-blockchain/go-batcher
+module github.com/bsv-blockchain/go-batcher/v2
 
 go 1.25.0
 

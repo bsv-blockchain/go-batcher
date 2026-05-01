@@ -27,7 +27,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bsv-blockchain/go-batcher"
+	"github.com/bsv-blockchain/go-batcher/v2"
 )
 
 // UserEvent represents a user activity event in our system.

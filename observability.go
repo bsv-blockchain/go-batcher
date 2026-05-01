@@ -89,7 +89,7 @@ func defaultConfig() *config {
 	return &config{
 		logger:       nopLogger{},
 		metricsBound: nopBoundMetrics{},
-		tracer:       noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher"),
+		tracer:       noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher/v2"),
 		name:         "batcher",
 	}
 }
@@ -138,7 +138,7 @@ func WithMetrics(m Metrics) Option {
 func WithTracer(t trace.Tracer) Option {
 	return func(c *config) {
 		if t == nil {
-			c.tracer = noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher")
+			c.tracer = noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher/v2")
 			return
 		}
 		c.tracer = t
