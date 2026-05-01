@@ -32,6 +32,10 @@ type mockBoundMetrics struct {
 	totalBatchSize    int
 	totalBatchSeconds float64
 	backpressureWait  int
+	workerStarted     int
+	workerFinished    int
+	workersInFlight   int
+	peakWorkers       int
 	dedupHit          int
 	dedupMiss         int
 	panicRecovered    int
@@ -73,6 +77,23 @@ func (m *mockBoundMetrics) BackpressureWait(time.Duration) {
 	m.mu.Unlock()
 }
 
+func (m *mockBoundMetrics) WorkerStarted() {
+	m.mu.Lock()
+	m.workerStarted++
+	m.workersInFlight++
+	if m.workersInFlight > m.peakWorkers {
+		m.peakWorkers = m.workersInFlight
+	}
+	m.mu.Unlock()
+}
+
+func (m *mockBoundMetrics) WorkerFinished() {
+	m.mu.Lock()
+	m.workerFinished++
+	m.workersInFlight--
+	m.mu.Unlock()
+}
+
 func (m *mockBoundMetrics) DedupHit() {
 	m.mu.Lock()
 	m.dedupHit++
@@ -98,6 +119,10 @@ type metricsSnapshot struct {
 	batchProcessed   int
 	totalBatchSize   int
 	backpressureWait int
+	workerStarted    int
+	workerFinished   int
+	workersInFlight  int
+	peakWorkers      int
 	dedupHit         int
 	dedupMiss        int
 	panicRecovered   int
@@ -120,6 +145,10 @@ func (m *mockBoundMetrics) snapshot() metricsSnapshot {
 		batchProcessed:   m.batchProcessed,
 		totalBatchSize:   m.totalBatchSize,
 		backpressureWait: m.backpressureWait,
+		workerStarted:    m.workerStarted,
+		workerFinished:   m.workerFinished,
+		workersInFlight:  m.workersInFlight,
+		peakWorkers:      m.peakWorkers,
 		dedupHit:         m.dedupHit,
 		dedupMiss:        m.dedupMiss,
 		panicRecovered:   m.panicRecovered,
