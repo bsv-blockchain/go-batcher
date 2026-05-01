@@ -735,7 +735,7 @@ func TestSetMaxConcurrent_ZeroNoLimit(t *testing.T) {
 	}, true)
 	b.SetMaxConcurrent(0) // Should be a no-op
 
-	assert.Nil(t, b.sem, "Semaphore should not be created for maxConcurrent=0")
+	assert.Nil(t, b.workCh, "Worker pool should not be created for maxConcurrent=0")
 
 	for i := 0; i < 5; i++ {
 		b.Put(&batchStoreItem{})
