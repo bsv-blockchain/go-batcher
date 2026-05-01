@@ -375,11 +375,16 @@ func (b *Batcher[T]) SetMaxConcurrent(n int) {
 	for i := 0; i < n; i++ {
 		go func() {
 			for w := range b.workCh {
+				// dispatchAndRecord recovers from panics, so WorkerFinished
+				// is reached on every iteration without a defer. Avoiding the
+				// defer keeps the hot path closure-free.
+				b.cfg.metricsBound.WorkerStarted()
 				b.dispatchAndRecord(w.batch, w.links, w.reason)
 				if b.usePool {
 					slice := w.batch[:0]
 					b.pool.Put(&slice)
 				}
+				b.cfg.metricsBound.WorkerFinished()
 			}
 		}()
 	}

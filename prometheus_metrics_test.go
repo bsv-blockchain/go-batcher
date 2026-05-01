@@ -82,6 +82,17 @@ func histogramSampleCount(t *testing.T, reg *prometheus.Registry, name string, l
 	return m.GetHistogram().GetSampleCount()
 }
 
+// gaugeValue returns the current value of a gauge series. Returns -1 if the
+// series is not present.
+func gaugeValue(t *testing.T, reg *prometheus.Registry, name string, labelKV ...string) float64 {
+	t.Helper()
+	m := findMetric(t, reg, name, labelKV...)
+	if m == nil || m.GetGauge() == nil {
+		return -1
+	}
+	return m.GetGauge().GetValue()
+}
+
 func TestPrometheusMetricsRegistersAllSeries(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPrometheusMetrics(reg, "test", "batch")
@@ -96,6 +107,7 @@ func TestPrometheusMetricsRegistersAllSeries(t *testing.T) {
 		"test_batch_batch_size",
 		"test_batch_batch_duration_seconds",
 		"test_batch_backpressure_wait_seconds",
+		"test_batch_workers_in_flight",
 		"test_batch_dedup_total",
 		"test_batch_panic_total",
 	} {
@@ -182,6 +194,53 @@ func familyHasLabel(mf *dto.MetricFamily, key, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestPrometheusWorkersInFlightGauge verifies the workers_in_flight gauge
+// increments as persistent workers pick up batches and decrements after each
+// batch finishes — and that it never exceeds maxConcurrent.
+func TestPrometheusWorkersInFlightGauge(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics(reg, "test", "batch")
+
+	release := make(chan struct{})
+	started := make(chan struct{}, 4)
+	b := New[int](1, time.Hour, func(_ []*int) {
+		started <- struct{}{}
+		<-release
+	}, true, WithName("pool"), WithMetrics(m))
+	b.SetMaxConcurrent(2)
+	defer b.Close()
+
+	// Submit enough items to keep both workers busy and queue more behind them.
+	for i := 0; i < 4; i++ {
+		x := i
+		b.Put(&x)
+	}
+
+	// Wait for both workers to be executing fn.
+	for i := 0; i < 2; i++ {
+		<-started
+	}
+
+	require.Eventually(t, func() bool {
+		return gaugeValue(t, reg, "test_batch_workers_in_flight", "batcher", "pool") == 2
+	}, time.Second, 5*time.Millisecond, "expected gauge to settle at 2 while both workers run")
+
+	// Release one worker; gauge should drop to 1, then climb back to 2 as the
+	// next queued batch is picked up.
+	release <- struct{}{}
+	<-started // a third batch starts
+	require.Eventually(t, func() bool {
+		return gaugeValue(t, reg, "test_batch_workers_in_flight", "batcher", "pool") == 2
+	}, time.Second, 5*time.Millisecond, "expected gauge to climb back to 2 as queued batch is picked up")
+
+	// Drain the rest.
+	close(release)
+	<-started
+	require.Eventually(t, func() bool {
+		return gaugeValue(t, reg, "test_batch_workers_in_flight", "batcher", "pool") == 0
+	}, time.Second, 5*time.Millisecond, "expected gauge to drop to 0 once all workers are idle")
 }
 
 func TestPrometheusDedupCounters(t *testing.T) {

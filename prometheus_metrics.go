@@ -30,6 +30,7 @@ type prometheusMetrics struct {
 	batchSize        *prometheus.HistogramVec
 	batchDuration    *prometheus.HistogramVec
 	backpressureWait *prometheus.HistogramVec
+	workersInFlight  *prometheus.GaugeVec
 	dedup            *prometheus.CounterVec
 	panics           *prometheus.CounterVec
 }
@@ -88,8 +89,14 @@ func NewPrometheusMetrics(reg prometheus.Registerer, namespace, subsystem string
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "backpressure_wait_seconds",
-			Help:      "Time the worker waited for a SetMaxConcurrent semaphore slot.",
+			Help:      "Time the worker waited for a SetMaxConcurrent worker slot.",
 			Buckets:   metricsBucketsMilliSeconds,
+		}, []string{"batcher"}),
+		workersInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "workers_in_flight",
+			Help:      "Number of SetMaxConcurrent persistent workers currently executing the batch fn. Combined with backpressure_wait_seconds it indicates pool saturation.",
 		}, []string{"batcher"}),
 		dedup: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
@@ -115,6 +122,7 @@ func (m *prometheusMetrics) Bind(name string) BoundMetrics {
 		batchSize:           m.batchSize.WithLabelValues(name),
 		batchDuration:       m.batchDuration.WithLabelValues(name),
 		backpressureWait:    m.backpressureWait.WithLabelValues(name),
+		workersInFlight:     m.workersInFlight.WithLabelValues(name),
 		panics:              m.panics.WithLabelValues(name),
 		batchSizeReason:     m.batches.WithLabelValues(name, ReasonSize),
 		batchTimeoutReason:  m.batches.WithLabelValues(name, ReasonTimeout),
@@ -132,6 +140,7 @@ type boundPrometheusMetrics struct {
 	batchSize           prometheus.Observer
 	batchDuration       prometheus.Observer
 	backpressureWait    prometheus.Observer
+	workersInFlight     prometheus.Gauge
 	panics              prometheus.Counter
 	batchSizeReason     prometheus.Counter
 	batchTimeoutReason  prometheus.Counter
@@ -151,6 +160,9 @@ func (b *boundPrometheusMetrics) EnqueueBlocked(d time.Duration) {
 func (b *boundPrometheusMetrics) BackpressureWait(d time.Duration) {
 	b.backpressureWait.Observe(d.Seconds())
 }
+
+func (b *boundPrometheusMetrics) WorkerStarted()  { b.workersInFlight.Inc() }
+func (b *boundPrometheusMetrics) WorkerFinished() { b.workersInFlight.Dec() }
 
 func (b *boundPrometheusMetrics) DedupHit()       { b.dedupHit.Inc() }
 func (b *boundPrometheusMetrics) DedupMiss()      { b.dedupMiss.Inc() }

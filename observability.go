@@ -45,6 +45,15 @@ type BoundMetrics interface {
 	// BackpressureWait is called when the worker waited for a slot in the
 	// SetMaxConcurrent semaphore.
 	BackpressureWait(d time.Duration)
+	// WorkerStarted is called by a SetMaxConcurrent persistent worker when it
+	// picks up a batch to process. Implementations should treat this as +1 to
+	// a gauge; combined with the BackpressureWait histogram it indicates pool
+	// saturation. Not called on the n==0 (unbounded) path.
+	WorkerStarted()
+	// WorkerFinished is called by a SetMaxConcurrent persistent worker after
+	// the dispatch returns (panics are already recovered upstream). Pair with
+	// WorkerStarted: implementations should treat this as -1 to the same gauge.
+	WorkerFinished()
 	// DedupHit / DedupMiss are recorded by BatcherWithDedup on every Put.
 	DedupHit()
 	DedupMiss()
@@ -162,6 +171,8 @@ func (nopBoundMetrics) EnqueueBlocked(time.Duration)      {}
 func (nopBoundMetrics) BatchTriggered(string)             {}
 func (nopBoundMetrics) BatchProcessed(int, time.Duration) {}
 func (nopBoundMetrics) BackpressureWait(time.Duration)    {}
+func (nopBoundMetrics) WorkerStarted()                    {}
+func (nopBoundMetrics) WorkerFinished()                   {}
 func (nopBoundMetrics) DedupHit()                         {}
 func (nopBoundMetrics) DedupMiss()                        {}
 func (nopBoundMetrics) PanicRecovered()                   {}
