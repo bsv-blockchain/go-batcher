@@ -188,6 +188,62 @@ go get -u github.com/bsv-blockchain/go-batcher
 
 <br/>
 
+## 📈 Observability
+
+All constructors accept a trailing variadic `...Option` so you can attach a
+logger, Prometheus metrics, an OpenTelemetry tracer, and a name without
+breaking the existing API. Omit the options and you get the original zero-cost
+behaviour — defaults are no-op.
+
+```go
+m := batcher.NewPrometheusMetrics(reg, "myservice", "batcher")
+
+store := batcher.New(100, 5*time.Second, fn, true,
+    batcher.WithName("store"),                // distinguishes batchers in metrics & traces
+    batcher.WithLogger(logger),               // ulogger.Logger satisfies it directly
+    batcher.WithMetrics(m),                   // share one Metrics across all batchers
+    batcher.WithTracer(otel.Tracer("batcher")),
+)
+
+// Tracing-aware enqueue: the SpanContext from ctx is recorded as a link on
+// the batch span when this item is flushed.
+store.PutCtx(ctx, item)
+```
+
+When a service runs multiple batchers, share one `Metrics` provider and
+distinguish them by `WithName`:
+
+```go
+m := batcher.NewPrometheusMetrics(reg, "myservice", "batcher")
+storeBatcher    := batcher.New(..., batcher.WithName("store"),     batcher.WithMetrics(m))
+getBatcher      := batcher.New(..., batcher.WithName("get"),       batcher.WithMetrics(m))
+setMinedBatcher := batcher.New(..., batcher.WithName("set_mined"), batcher.WithMetrics(m))
+```
+
+All series carry a `batcher` label so each one can be graphed independently.
+Series exported (under your chosen `<namespace>_<subsystem>_…`):
+
+| Metric                            | Type           | Labels                  |
+|-----------------------------------|----------------|-------------------------|
+| `enqueued_total`                  | counter        | `batcher`               |
+| `enqueue_blocked_seconds`         | histogram      | `batcher`               |
+| `batches_total`                   | counter        | `batcher`, `reason`     |
+| `batch_size`                      | histogram      | `batcher`               |
+| `batch_duration_seconds`          | histogram      | `batcher`               |
+| `backpressure_wait_seconds`       | histogram      | `batcher`               |
+| `dedup_total`                     | counter        | `batcher`, `result`     |
+| `panic_total`                     | counter        | `batcher`               |
+
+`reason` ∈ `{size, timeout, manual, drain, shutdown}`; `result` ∈ `{hit, miss}`.
+
+Each batch dispatch is wrapped in an OTel span named `<name>.flush` with
+attributes `batcher.name`, `batcher.batch_size`, `batcher.reason`. Span links
+are added for every item enqueued via `PutCtx`. Panics in the user batch
+function are recovered, logged, and recorded on both the panic counter and
+the span (status = error) — the worker keeps running.
+
+<br/>
+
 ## 📚 Documentation
 
 - **API Reference** – Dive into the godocs at [pkg.go.dev/github.com/bsv-blockchain/go-batcher](https://pkg.go.dev/github.com/bsv-blockchain/go-batcher)

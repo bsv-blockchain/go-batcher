@@ -1,6 +1,7 @@
 package batcher
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	txmap "github.com/bsv-blockchain/go-tx-map"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // BloomFilter is a simple bloom filter implementation for fast negative lookups.
@@ -751,7 +753,7 @@ type BatcherWithDedup[T comparable] struct { //nolint:revive // Name is clear an
 // - Uses 1-second buckets for fine-grained expiration (61 buckets total)
 // - Duplicates are silently dropped without notification
 // - Memory usage scales with number of unique items in the time window
-func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
+func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
 	b := &BatcherWithDedup[T]{
@@ -760,11 +762,12 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 			size:       size,
 			timeout:    timeout,
 			batch:      make([]*T, 0, size),
-			ch:         make(chan *T, size*64),
+			ch:         make(chan itemEnvelope[T], size*64),
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    false,
 			done:       make(chan struct{}),
+			cfg:        applyOptions(opts),
 		},
 		deduplicationWindow: deduplicationWindow,
 		// Create an optimized time-partitioned map with bloom filter
@@ -777,7 +780,7 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 }
 
 // NewWithDeduplicationAndPool creates a BatcherWithDedup with slice pooling enabled.
-func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool) *BatcherWithDedup[T] {
+func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *BatcherWithDedup[T] {
 	deduplicationWindow := time.Minute // 1-minute deduplication window
 
 	b := &BatcherWithDedup[T]{
@@ -786,7 +789,7 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 			size:       size,
 			timeout:    timeout,
 			batch:      make([]*T, 0, size),
-			ch:         make(chan *T, size*64),
+			ch:         make(chan itemEnvelope[T], size*64),
 			triggerCh:  make(chan struct{}),
 			background: background,
 			usePool:    true,
@@ -797,6 +800,7 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 					return &slice
 				},
 			},
+			cfg: applyOptions(opts),
 		},
 		deduplicationWindow: deduplicationWindow,
 		// Create an optimized time-partitioned map with bloom filter
@@ -854,13 +858,26 @@ func (b *BatcherWithDedup[T]) Close() {
 // - The variadic parameter from base Put is not supported
 // - Deduplication is based on item value equality (==)
 func (b *BatcherWithDedup[T]) Put(item *T) {
+	b.PutCtx(context.Background(), item)
+}
+
+// PutCtx is like Put but captures the SpanContext from ctx so the eventual
+// batch span carries it as a link. Duplicate items (within the dedup window)
+// are silently dropped before being enqueued; the dedup hit/miss is recorded
+// to metrics either way.
+func (b *BatcherWithDedup[T]) PutCtx(ctx context.Context, item *T) {
 	if item == nil {
 		return
 	}
 
-	// Set returns TRUE if the item was added, FALSE if it was a duplicate
-	if b.deduplicationMap.Set(*item, struct{}{}) {
-		// Add the item to the batch
-		b.ch <- item
+	// Set returns TRUE if the item was added, FALSE if it was a duplicate.
+	if !b.deduplicationMap.Set(*item, struct{}{}) {
+		b.cfg.metricsBound.DedupHit()
+		return
 	}
+	b.cfg.metricsBound.DedupMiss()
+	b.enqueue(itemEnvelope[T]{
+		item: item,
+		sc:   trace.SpanContextFromContext(ctx),
+	})
 }
