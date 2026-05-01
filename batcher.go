@@ -12,6 +12,9 @@
 // - Thread-safe concurrent operations
 // - Zero idle CPU usage: Lazy timer activation only when items are batched
 // - Graceful shutdown support with Close() for clean goroutine lifecycle
+// - Optional observability hooks (Logger / Metrics / OpenTelemetry Tracer) via WithLogger,
+//   WithMetrics, WithTracer, WithName options. All default to no-op when omitted, so users
+//   outside teranode pay zero observability cost.
 //
 // Performance characteristics:
 // - Idle state: 0% CPU usage (no timers running when batch is empty)
@@ -32,22 +35,39 @@
 //	batcher.Put(&User{Name: "John"})
 //	defer batcher.Close() // Graceful shutdown
 //
-// Important notes:
-// - The batcher runs a background goroutine managed via context
-// - Items are passed by pointer to avoid unnecessary copying
-// - The processing function is called synchronously or asynchronously based on the background flag
-// - Batches are processed when size is reached, timeout expires, or Trigger() is called
-// - Call Close() for graceful shutdown to process remaining items and prevent goroutine leaks
+// With observability wired in:
 //
-// This package is part of the go-batcher library and provides efficient batch processing
-// capabilities for high-throughput applications with minimal resource consumption.
+//	m := batcher.NewPrometheusMetrics(reg, "myservice", "batcher")
+//	b := batcher.New(100, 5*time.Second, fn, true,
+//	    batcher.WithName("user_writes"),
+//	    batcher.WithLogger(logger),
+//	    batcher.WithMetrics(m),
+//	    batcher.WithTracer(otel.Tracer("batcher")),
+//	)
+//	b.PutCtx(ctx, &User{Name: "John"}) // span context becomes a link on the batch span
 package batcher
 
 import (
+	"context"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// itemEnvelope wraps a queued item together with the OpenTelemetry SpanContext
+// captured at PutCtx time. The SpanContext is a 24-byte value type, so the
+// envelope adds bounded memory overhead per channel slot. An invalid (zero)
+// SpanContext means no span link will be emitted for this item.
+type itemEnvelope[T any] struct {
+	item *T
+	sc   trace.SpanContext
+}
 
 // Batcher is a generic batching utility that aggregates items and processes them in groups.
 //
@@ -58,28 +78,12 @@ import (
 //
 // Type parameters:
 // - T: The type of items to be batched (can be any type)
-//
-// Fields:
-// - fn: The callback function that processes completed batches
-// - size: Maximum number of items in a batch before automatic processing
-// - timeout: Maximum duration to wait before processing an incomplete batch
-// - batch: Internal slice holding the current batch of items
-// - ch: Buffered channel for receiving items to batch
-// - triggerCh: Channel for manual batch processing triggers
-// - background: If true, batch processing happens in a separate goroutine
-// - usePool: If true, uses sync.Pool for slice reuse to reduce allocations
-// - pool: Optional sync.Pool for reusing batch slices
-//
-// Notes:
-// - The Batcher is thread-safe and can be used concurrently
-// - Items are passed by pointer to avoid copying
-// - The internal worker goroutine runs indefinitely
 type Batcher[T any] struct {
 	fn            func([]*T)
 	size          int
 	timeout       time.Duration
 	batch         []*T
-	ch            chan *T
+	ch            chan itemEnvelope[T]
 	triggerCh     chan struct{}
 	background    bool
 	usePool       bool
@@ -88,44 +92,30 @@ type Batcher[T any] struct {
 	drainMode     atomic.Bool
 	maxConcurrent int
 	sem           chan struct{}
+	cfg           *config
 }
 
 // New creates a new Batcher instance with the specified configuration.
-//
-// This function initializes a Batcher that collects items and processes them in batches
-// according to the configured size and timeout parameters. The Batcher starts a background
-// worker goroutine that continuously monitors for items to batch.
 //
 // Parameters:
 //   - size: Maximum number of items per batch. When this limit is reached, the batch is immediately processed
 //   - timeout: Maximum duration to wait before processing an incomplete batch. Prevents items from waiting indefinitely
 //   - fn: Callback function that processes each batch. Receives a slice of pointers to the batched items
 //   - background: If true, the fn callback is executed in a separate goroutine (non-blocking)
-//     If false, the fn callback blocks the worker until completion
-//
-// Returns:
-// - *Batcher[T]: A configured and running Batcher instance ready to accept items
-//
-// Side Effects:
-// - Starts a background worker goroutine that runs indefinitely
-// - Creates internal channels for item processing and manual triggers
-//
-// Notes:
-// - The internal channel buffer is sized at 64x the batch size for performance
-// - The batch slice is pre-allocated with the specified size for efficiency
-// - The worker goroutine cannot be stopped once started (runs indefinitely)
-// - Passing background=true is recommended for I/O-bound operations to avoid blocking
-func New[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
+//   - opts: Optional observability configuration (WithLogger, WithMetrics, WithTracer, WithName).
+//     Omitted options default to fully no-op behaviour.
+func New[T any](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *Batcher[T] {
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
 		timeout:    timeout,
 		batch:      make([]*T, 0, size),
-		ch:         make(chan *T, size*64),
+		ch:         make(chan itemEnvelope[T], size*64),
 		triggerCh:  make(chan struct{}),
 		background: background,
 		usePool:    false,
 		done:       make(chan struct{}),
+		cfg:        applyOptions(opts),
 	}
 
 	go b.worker()
@@ -138,22 +128,13 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 // This constructor is similar to New() but initializes a sync.Pool for batch slices
 // and uses worker logic that retrieves and returns slices from the pool.
 // This can significantly reduce memory allocations and GC pressure in high-throughput scenarios.
-//
-// Parameters:
-//   - size: Maximum number of items per batch
-//   - timeout: Maximum duration to wait before processing an incomplete batch
-//   - fn: Callback function that processes each batch
-//   - background: If true, batch processing happens asynchronously
-//
-// Returns:
-// - *Batcher[T]: A configured and running Batcher instance with pooling enabled
-func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool) *Batcher[T] {
+func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *Batcher[T] {
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
 		timeout:    timeout,
 		batch:      make([]*T, 0, size),
-		ch:         make(chan *T, size*64),
+		ch:         make(chan itemEnvelope[T], size*64),
 		triggerCh:  make(chan struct{}),
 		background: background,
 		usePool:    true,
@@ -164,6 +145,7 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 			},
 		},
 		done: make(chan struct{}),
+		cfg:  applyOptions(opts),
 	}
 
 	go b.worker()
@@ -171,89 +153,54 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 	return b
 }
 
-// Put adds an item to the batch for processing using non-blocking channel send when possible.
+// Put adds an item to the batch for processing using a non-blocking channel send when possible.
 //
-// This method sends the item to the internal batching channel where it will be collected
-// by the worker goroutine. It attempts a non-blocking send first, falling back to blocking
-// only when the channel is full. This reduces goroutine blocking in high-throughput scenarios.
+// Use PutCtx instead if you have an active OpenTelemetry span context you want
+// linked to the eventual batch span. Put behaves identically to PutCtx with
+// context.Background().
 //
 // Parameters:
-// - item: Pointer to the item to be batched. Must not be nil
-// - _: Variadic int parameter for payload size (ignored in this implementation, kept for API compatibility)
-//
-// Returns:
-// - Nothing
-//
-// Side Effects:
-// - Sends the item through the internal channel to the worker goroutine
-// - May trigger batch processing if this item completes a full batch
-//
-// Notes:
-// - Uses fast-path non-blocking send when possible
-// - Falls back to blocking send only when channel is full
-// - Items are processed in the order they are received
-// - The variadic parameter exists for interface compatibility but is not used
-func (b *Batcher[T]) Put(item *T, _ ...int) { // Payload size is not used in this implementation
+// - item: Pointer to the item to be batched. Must not be nil.
+// - _: Variadic int parameter for payload size (kept for API compatibility, not used).
+func (b *Batcher[T]) Put(item *T, _ ...int) {
+	b.enqueue(itemEnvelope[T]{item: item})
+}
+
+// PutCtx is like Put but captures the SpanContext from ctx so the eventual
+// batch span carries it as a link. If ctx has no active span the call behaves
+// identically to Put.
+func (b *Batcher[T]) PutCtx(ctx context.Context, item *T, _ ...int) {
+	b.enqueue(itemEnvelope[T]{
+		item: item,
+		sc:   trace.SpanContextFromContext(ctx),
+	})
+}
+
+// enqueue is the shared hot path for Put and PutCtx. It tries a non-blocking
+// channel send first and only times the blocking fallback when the buffer is
+// full so the common case is allocation- and timer-free.
+func (b *Batcher[T]) enqueue(env itemEnvelope[T]) {
+	b.cfg.metricsBound.Enqueued()
 	select {
-	case b.ch <- item:
-		// Fast path - non-blocking send succeeded
+	case b.ch <- env:
+		return
 	default:
-		// Channel is full, fallback to blocking send
-		b.ch <- item
 	}
+	start := time.Now()
+	b.ch <- env
+	b.cfg.metricsBound.EnqueueBlocked(time.Since(start))
 }
 
 // Trigger forces immediate processing of the current batch.
-//
-// This method sends a signal to the worker goroutine to process whatever items are
-// currently in the batch, regardless of size or timeout constraints. This is useful
-// for ensuring all pending items are processed before shutdown or when you need
-// immediate processing for application-specific reasons.
-//
-// Parameters:
-// - None
-//
-// Returns:
-// - Nothing
-//
-// Side Effects:
-// - Causes the worker goroutine to immediately process the current batch
-// - Resets the timeout timer after processing
-//
-// Notes:
-// - If the batch is empty, the trigger signal is still sent but no processing occurs
-// - This method is non-blocking and returns immediately
-// - Multiple rapid triggers are safe but may result in processing empty or small batches
 func (b *Batcher[T]) Trigger() {
 	b.triggerCh <- struct{}{}
 }
 
 // Close gracefully shuts down the batcher, allowing pending items to be processed.
 //
-// This method signals the worker goroutine to stop accepting new items and process
-// any remaining items in the queue before exiting. It provides a clean shutdown
-// mechanism that prevents goroutine leaks and ensures all queued items are flushed.
-//
-// Parameters:
-// - None
-//
-// Returns:
-// - Nothing
-//
-// Side Effects:
-// - Cancels the internal context, signaling the worker to begin shutdown
-// - The worker will process all items currently in the channel
-// - The worker will flush any partial batch before exiting
-// - The internal channel is closed after draining, preventing further Put() calls
-//
-// Notes:
-// - This method returns immediately without waiting for shutdown to complete
-// - It's safe to call Close() multiple times (subsequent calls have no effect)
-// - Items already in the channel will be processed during shutdown
-//
-// IMPORTANT: Do not call Put() after Close() has been called. The channel is closed
-// during shutdown, and any Put() calls after Close() will panic with "send on closed channel".
-// Users must ensure proper synchronization to prevent Put() calls after Close().
+// IMPORTANT: Do not call Put() / PutCtx() after Close() has been called. The
+// channel is closed during shutdown, and any further send will panic with
+// "send on closed channel". Callers must ensure proper synchronization.
 func (b *Batcher[T]) Close() {
 	close(b.done)
 }
@@ -263,10 +210,6 @@ func (b *Batcher[T]) Close() {
 // When drain mode is enabled, the worker drains all currently-available items
 // from the channel (up to the size cap) and fires immediately — instead of
 // accumulating to the size threshold or waiting for the timeout.
-//
-// This produces adaptive batch sizes that naturally scale with throughput:
-// at low throughput, batches are small (even single-item) with near-zero latency;
-// at high throughput, batches grow larger as more items queue during processing.
 func (b *Batcher[T]) SetDrainMode(enabled bool) {
 	b.drainMode.Store(enabled)
 }
@@ -275,13 +218,8 @@ func (b *Batcher[T]) SetDrainMode(enabled bool) {
 // processing goroutines. When the limit is reached, the worker blocks until a
 // slot is available, which naturally applies backpressure through the channel.
 //
-// This prevents unbounded goroutine accumulation when the batch processing
-// function (e.g., a gRPC call) is slower than the incoming item rate. Without
-// this limit, background=true causes the worker to spawn unlimited goroutines
-// that can exhaust memory.
-//
-// A value of 0 (default) means no limit (original behavior).
-// Must be called before items are added to the batcher.
+// A value of 0 (default) means no limit. Must be called before items are added
+// to the batcher.
 func (b *Batcher[T]) SetMaxConcurrent(n int) {
 	if n > 0 {
 		b.maxConcurrent = n
@@ -291,41 +229,15 @@ func (b *Batcher[T]) SetMaxConcurrent(n int) {
 
 // worker is the core processing loop that manages batch aggregation and processing.
 //
-// This function runs as a background goroutine and continuously monitors three conditions
-// for batch processing: size limit reached, timeout expired, or manual trigger received.
-// It uses timer reuse and slice pooling when enabled.
-//
-// This function performs the following steps:
-// - Creates a reusable timeout timer (optimization over time.After)
-// - Monitors three channels simultaneously using select:
-//   - Item channel: Receives new items to add to the current batch
-//   - Timeout channel: Fires when the timeout duration expires
-//   - Trigger channel: Receives manual trigger signals
-//
-// - Processes the batch when any trigger condition is met
-// - Resets the batch and starts a new cycle with efficient slice management
-//
-// Parameters:
-// - None (operates on Batcher receiver fields)
-//
-// Returns:
-// - Nothing (runs indefinitely)
-//
-// Side Effects:
-// - Consumes items from the internal channels
-// - Invokes the batch processing function (fn) with completed batches
-// - May spawn new goroutines if background processing is enabled
-// - Uses slice pooling if enabled to reduce allocations
-//
-// Notes:
-// - This function runs indefinitely and cannot be stopped
-// - Uses goto for performance optimization to avoid deep nesting
-// - Empty batches are not processed (checked before invoking fn)
-// - Reuses timers to reduce allocations and GC pressure
-// - When usePool=true, manages slice lifecycle through sync.Pool for memory efficiency
+// It maintains a worker-local slice of trace.Link records gathered from items
+// enqueued via PutCtx; the slice is passed to the batch span when the batch
+// is dispatched. Each dispatch is wrapped in a defer/recover so a panic from
+// the user fn is logged, recorded as a metric, and the worker keeps running
+// (previously a panic silently killed the goroutine).
 func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
 	var timer *time.Timer
 	var timerCh <-chan time.Time // nil channel blocks forever, enabling lazy timer activation
+	var batchLinks []trace.Link
 
 	defer func() {
 		if timer != nil {
@@ -334,52 +246,66 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 	}()
 
 	for {
+		var reason string
+
 		select {
 		case <-b.done:
-			// Shutdown: drain channel and process remaining items
+			// Shutdown: drain channel and process remaining items.
 			close(b.ch)
-			for item := range b.ch {
-				b.batch = append(b.batch, item)
+			for env := range b.ch {
+				b.batch = append(b.batch, env.item)
+				if env.sc.IsValid() {
+					batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+				}
 			}
-			// Flush final batch if any
 			if len(b.batch) > 0 {
-				b.fn(b.batch)
+				b.cfg.logger.Infof("batcher %q: draining %d items on shutdown", b.cfg.name, len(b.batch))
+				b.dispatchAndRecord(b.batch, batchLinks, ReasonShutdown)
 			}
 			return
 
-		case item := <-b.ch:
-			b.batch = append(b.batch, item)
+		case env := <-b.ch:
+			b.batch = append(b.batch, env.item)
+			if env.sc.IsValid() {
+				batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+			}
 
 			if b.drainMode.Load() {
-				// Drain all available items up to size cap, then fire immediately
+				// Drain all available items up to size cap, then fire immediately.
 				for len(b.batch) < b.size {
 					select {
-					case item := <-b.ch:
-						b.batch = append(b.batch, item)
+					case env := <-b.ch:
+						b.batch = append(b.batch, env.item)
+						if env.sc.IsValid() {
+							batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+						}
 					default:
+						reason = ReasonDrain
 						goto saveBatch
 					}
 				}
+				reason = ReasonDrain
 				goto saveBatch
 			}
 
-			// Start timer on first item (lazy timer activation)
+			// Lazy timer activation: start on first item only.
 			if len(b.batch) == 1 {
 				timer = time.NewTimer(b.timeout)
 				timerCh = timer.C
 			}
 
-			// Flush if size limit reached
 			if len(b.batch) == b.size {
 				if timer != nil {
 					timer.Stop()
 					timerCh = nil
 				}
+				reason = ReasonSize
 				goto saveBatch
 			}
 
-		case <-timerCh: // Only fires when timerCh != nil (batch has items)
-			timerCh = nil // Disable timer after firing
+		case <-timerCh: // Only fires when timerCh != nil (batch has items).
+			timerCh = nil
+			reason = ReasonTimeout
 			goto saveBatch
 
 		case <-b.triggerCh:
@@ -387,6 +313,7 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				timer.Stop()
 				timerCh = nil
 			}
+			reason = ReasonManual
 			goto saveBatch
 		}
 
@@ -395,59 +322,99 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 	saveBatch:
 		if len(b.batch) > 0 { //nolint:nestif // Necessary complexity for handling pooling and background modes
 			batch := b.batch
+			links := batchLinks
 
 			if b.background {
 				// Acquire semaphore slot if max concurrent is set.
-				// This blocks the worker, causing the channel to fill and
-				// Put() to block, providing natural backpressure.
 				if b.sem != nil {
+					semStart := time.Now()
 					select {
 					case b.sem <- struct{}{}:
+						if wait := time.Since(semStart); wait > time.Microsecond {
+							b.cfg.metricsBound.BackpressureWait(wait)
+						}
 					case <-b.done:
-						// Shutdown while waiting for semaphore — process synchronously
-						b.fn(batch)
+						// Shutdown while waiting for semaphore — process synchronously.
+						b.dispatchAndRecord(batch, links, reason)
 						return
 					}
 				}
 
 				if b.usePool {
-					go func(batch []*T) {
+					go func(batch []*T, links []trace.Link, reason string) {
 						defer func() {
 							if b.sem != nil {
 								<-b.sem
 							}
 						}()
-						b.fn(batch)
-						// Return the slice to the pool after processing
+						b.dispatchAndRecord(batch, links, reason)
 						slice := batch[:0]
 						b.pool.Put(&slice)
-					}(batch)
+					}(batch, links, reason)
 				} else {
-					go func(batch []*T) {
+					go func(batch []*T, links []trace.Link, reason string) {
 						defer func() {
 							if b.sem != nil {
 								<-b.sem
 							}
 						}()
-						b.fn(batch)
-					}(batch)
+						b.dispatchAndRecord(batch, links, reason)
+					}(batch, links, reason)
 				}
 			} else {
-				b.fn(batch)
+				b.dispatchAndRecord(batch, links, reason)
 				if b.usePool {
-					// Return the slice to the pool after processing
 					slice := batch[:0]
 					b.pool.Put(&slice)
 				}
 			}
 
-			// Get a new slice (from pool if enabled, or allocate new)
+			// Reset for the next batch. We must not reuse the underlying
+			// arrays of `batch` / `links` because background dispatch may
+			// still be reading them — allocate fresh slices instead. The
+			// pool path takes care of `batch` separately.
 			if b.usePool {
 				newBatchPtr := b.pool.Get().(*[]*T)
 				b.batch = *newBatchPtr
 			} else {
 				b.batch = make([]*T, 0, b.size)
 			}
+			batchLinks = nil
 		}
 	}
+}
+
+// dispatchAndRecord runs the user fn under a tracer span, records timing and
+// trigger metrics, and recovers from panics so the worker survives.
+func (b *Batcher[T]) dispatchAndRecord(batch []*T, links []trace.Link, reason string) {
+	b.cfg.metricsBound.BatchTriggered(reason)
+
+	startOpts := []trace.SpanStartOption{
+		trace.WithAttributes(
+			attribute.String("batcher.name", b.cfg.name),
+			attribute.Int("batcher.batch_size", len(batch)),
+			attribute.String("batcher.reason", reason),
+		),
+	}
+	if len(links) > 0 {
+		startOpts = append(startOpts, trace.WithLinks(links...))
+	}
+	_, span := b.cfg.tracer.Start(context.Background(), b.cfg.name+".flush", startOpts...)
+
+	start := time.Now()
+	defer func() {
+		dur := time.Since(start)
+		if r := recover(); r != nil {
+			err := fmt.Errorf("%v", r)
+			stack := debug.Stack()
+			b.cfg.logger.Errorf("batcher %q: panic in batch fn: %v\n%s", b.cfg.name, r, stack)
+			b.cfg.metricsBound.PanicRecovered()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		b.cfg.metricsBound.BatchProcessed(len(batch), dur)
+		span.End()
+	}()
+
+	b.fn(batch)
 }
