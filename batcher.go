@@ -84,6 +84,16 @@ type itemEnvelope[T any] struct {
 	sc   trace.SpanContext
 }
 
+// workItem is the payload handed from the worker goroutine to the persistent
+// dispatch pool created by SetMaxConcurrent. Bundling the trace links and
+// reason avoids per-batch closures and keeps observability intact for the
+// pool path.
+type workItem[T any] struct {
+	batch  []*T
+	links  []trace.Link
+	reason string
+}
+
 // Batcher is a generic batching utility that aggregates items and processes them in groups.
 //
 // The Batcher collects items of type T and invokes a processing function when either:
@@ -123,8 +133,14 @@ type Batcher[T any] struct {
 	done          chan struct{}
 	drainMode     atomic.Bool
 	maxConcurrent int
-	sem           chan struct{}
 	cfg           *config
+	// workCh is non-nil iff SetMaxConcurrent(n>0) was called. When non-nil,
+	// the worker dispatches batches to a fixed pool of N persistent goroutines
+	// over an unbuffered (rendezvous) channel — sender blocks until a worker
+	// is ready, providing the same backpressure as the previous semaphore.
+	// The worker goroutine is the sole sender; close happens after final-batch
+	// flush in the shutdown branch.
+	workCh chan workItem[T]
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -338,20 +354,34 @@ func (b *Batcher[T]) SetDrainMode(enabled bool) {
 }
 
 // SetMaxConcurrent limits the number of concurrent in-flight background batch
-// processing goroutines. When the limit is reached, the worker blocks until a
-// slot is available, which naturally applies backpressure through the channel.
+// processing goroutines. When n>0 the batcher launches N persistent worker
+// goroutines that consume batches from an unbuffered channel; the worker
+// blocks on dispatch until one is ready, providing natural backpressure.
 //
 // This prevents unbounded goroutine accumulation when the batch processing
-// function (e.g., a gRPC call) is slower than the incoming item rate. Without
-// this limit, background=true causes the worker to spawn unlimited goroutines
-// that can exhaust memory.
+// function (e.g., a gRPC call) is slower than the incoming item rate, and
+// avoids spawning a fresh goroutine per batch on the hot path.
 //
-// A value of 0 (default) means no limit (original behavior).
+// A value of 0 (default) means no limit — batches dispatch on a fresh
+// goroutine each (the original unbounded-concurrency behavior).
 // Must be called before items are added to the batcher.
 func (b *Batcher[T]) SetMaxConcurrent(n int) {
-	if n > 0 {
-		b.maxConcurrent = n
-		b.sem = make(chan struct{}, n)
+	if n <= 0 {
+		return
+	}
+	b.maxConcurrent = n
+	b.workCh = make(chan workItem[T]) // rendezvous: backpressure equivalent to a size-N semaphore
+	b.cfg.logger.Infof("batcher %q: starting persistent worker pool of size %d", b.cfg.name, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			for w := range b.workCh {
+				b.dispatchAndRecord(w.batch, w.links, w.reason)
+				if b.usePool {
+					slice := w.batch[:0]
+					b.pool.Put(&slice)
+				}
+			}
+		}()
 	}
 }
 
@@ -412,6 +442,12 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				b.cfg.logger.Infof("batcher %q: draining %d items on shutdown", b.cfg.name, len(b.batch))
 				b.dispatchAndRecord(b.batch, batchLinks, ReasonShutdown)
 			}
+			// We are the sole sender to workCh; closing here lets the
+			// persistent dispatch goroutines drain any in-flight batch and
+			// exit cleanly. No-op when SetMaxConcurrent was not configured.
+			if b.workCh != nil {
+				close(b.workCh)
+			}
 			return
 
 		case env := <-b.ch:
@@ -438,9 +474,16 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				goto saveBatch
 			}
 
-			// Lazy timer activation: start on first item only.
+			// Lazy timer activation: start on first item only. Reuse the same
+			// Timer across batches to avoid a per-batch allocation; safe under
+			// Go 1.23+ semantics where Reset on a stopped/expired timer will
+			// not deliver a stale value.
 			if len(b.batch) == 1 {
-				timer = time.NewTimer(b.timeout)
+				if timer == nil {
+					timer = time.NewTimer(b.timeout)
+				} else {
+					timer.Reset(b.timeout)
+				}
 				timerCh = timer.C
 			}
 
@@ -475,39 +518,35 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			links := batchLinks
 
 			if b.background {
-				// Acquire semaphore slot if max concurrent is set.
-				if b.sem != nil {
+				if b.workCh != nil {
+					// Hand the batch to a persistent worker. The unbuffered
+					// channel blocks here when all N workers are busy,
+					// applying backpressure up through b.ch and Put().
 					semStart := time.Now()
 					select {
-					case b.sem <- struct{}{}:
+					case b.workCh <- workItem[T]{batch: batch, links: links, reason: reason}:
 						if wait := time.Since(semStart); wait > time.Microsecond {
 							b.cfg.metricsBound.BackpressureWait(wait)
 						}
 					case <-b.done:
-						// Shutdown while waiting for semaphore — process synchronously.
+						// Shutdown while waiting for a worker — process synchronously.
+						b.cfg.logger.Warnf("batcher %q: dispatching batch of %d items inline due to shutdown while waiting for worker slot", b.cfg.name, len(batch))
 						b.dispatchAndRecord(batch, links, reason)
+						if b.usePool {
+							slice := batch[:0]
+							b.pool.Put(&slice)
+						}
 						return
 					}
-				}
-
-				if b.usePool {
+				} else if b.usePool {
+					// Unbounded concurrency path: spawn a fresh goroutine per batch.
 					go func(batch []*T, links []trace.Link, reason string) {
-						defer func() {
-							if b.sem != nil {
-								<-b.sem
-							}
-						}()
 						b.dispatchAndRecord(batch, links, reason)
 						slice := batch[:0]
 						b.pool.Put(&slice)
 					}(batch, links, reason)
 				} else {
 					go func(batch []*T, links []trace.Link, reason string) {
-						defer func() {
-							if b.sem != nil {
-								<-b.sem
-							}
-						}()
 						b.dispatchAndRecord(batch, links, reason)
 					}(batch, links, reason)
 				}
