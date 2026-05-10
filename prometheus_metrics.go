@@ -7,6 +7,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+const labelBatcher = "batcher"
+
 // metricsBucketsMicroSeconds mirrors teranode's util.MetricsBucketsMicroSeconds
 // so histograms align across services.
 //
@@ -44,7 +46,7 @@ type prometheusMetrics struct {
 //
 // Wire it up with:
 //
-//	m := batcher.NewPrometheusMetrics(reg, "myservice", "batcher")
+//	m := batcher.NewPrometheusMetrics(reg, "myservice", labelBatcher)
 //	store := batcher.New(..., batcher.WithName("store"),  batcher.WithMetrics(m))
 //	get   := batcher.New(..., batcher.WithName("get"),    batcher.WithMetrics(m))
 //
@@ -57,59 +59,59 @@ func NewPrometheusMetrics(reg prometheus.Registerer, namespace, subsystem string
 			Subsystem: subsystem,
 			Name:      "enqueued_total",
 			Help:      "Total items submitted to the batcher.",
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		enqueueBlocked: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "enqueue_blocked_seconds",
 			Help:      "Seconds a Put spent blocked when the channel was full.",
 			Buckets:   metricsBucketsMicroSeconds,
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		batches: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batches_total",
 			Help:      "Total batches dispatched, by trigger reason.",
-		}, []string{"batcher", "reason"}),
+		}, []string{labelBatcher, "reason"}),
 		batchSize: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_size",
 			Help:      "Size of each dispatched batch.",
 			Buckets:   prometheus.ExponentialBuckets(1, 2, 14),
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		batchDuration: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "batch_duration_seconds",
 			Help:      "Duration of the user batch-processing function.",
 			Buckets:   metricsBucketsMilliSeconds,
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		backpressureWait: factory.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "backpressure_wait_seconds",
 			Help:      "Time the worker waited for a SetMaxConcurrent worker slot.",
 			Buckets:   metricsBucketsMilliSeconds,
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		workersInFlight: factory.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "workers_in_flight",
 			Help:      "Number of SetMaxConcurrent persistent workers currently executing the batch fn. Combined with backpressure_wait_seconds it indicates pool saturation.",
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 		dedup: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "dedup_total",
 			Help:      "Deduplication results, by outcome.",
-		}, []string{"batcher", "result"}),
+		}, []string{labelBatcher, "result"}),
 		panics: factory.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "panic_total",
 			Help:      "Panics recovered while running the batch function.",
-		}, []string{"batcher"}),
+		}, []string{labelBatcher}),
 	}
 }
 
