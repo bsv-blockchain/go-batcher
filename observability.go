@@ -70,6 +70,8 @@ const (
 	ReasonManual   = "manual"
 	ReasonDrain    = "drain"
 	ReasonShutdown = "shutdown"
+
+	defaultName = "batcher"
 )
 
 // Option configures observability and naming on a Batcher. Options are passed
@@ -90,7 +92,7 @@ func defaultConfig() *config {
 		logger:       nopLogger{},
 		metricsBound: nopBoundMetrics{},
 		tracer:       noop.NewTracerProvider().Tracer("github.com/bsv-blockchain/go-batcher/v2"),
-		name:         "batcher",
+		name:         defaultName,
 	}
 }
 
