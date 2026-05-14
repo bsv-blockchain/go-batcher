@@ -43,7 +43,7 @@
     </td>
     <td align="left">
        <a href="https://github.com/bsv-blockchain/go-batcher/graphs/contributors"><img src="https://img.shields.io/github/contributors/bsv-blockchain/go-batcher?style=flat-square&color=orange" alt="Contributors"></a>
-       <a href="https://github.com/sponsors/bsv-blockchain"><img src="https://img.shields.io/badge/sponsor-BSV-181717?style=flat-square&logo=github" alt="Sponsor"></a>
+       <a href="https://deepwiki.com/bsv-blockchain/go-batcher"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
     </td>
   </tr>
 </table>
