@@ -3,7 +3,7 @@ module github.com/bsv-blockchain/go-batcher/v2
 go 1.25.0
 
 require (
-	github.com/bsv-blockchain/go-tx-map v1.3.5
+	github.com/bsv-blockchain/go-tx-map v1.3.7
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/stretchr/testify v1.11.1
