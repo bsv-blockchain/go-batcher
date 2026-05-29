@@ -244,6 +244,64 @@ the span (status = error) — the worker keeps running.
 
 <br/>
 
+## ⚙️ Trigger Modes
+
+By default the batcher fires when the batch reaches its size cap or the
+constructor's timeout elapses. Two optional modes change that behaviour.
+
+### Drain mode — `SetDrainMode(true)`
+
+When drain mode is on, the worker drains all items currently available in the
+channel (up to the size cap) and fires immediately — instead of accumulating to
+the size threshold or waiting for the timeout. Batch sizes adapt naturally with
+throughput: single-item at low load, larger as items queue during processing.
+
+```go
+b := batcher.New[string](1000, 5*time.Second, processFn, true)
+b.SetDrainMode(true) // must be called before items are added
+```
+
+**When to use:** high-throughput, latency-tolerant pipelines where you want
+batches to grow as large as the system can sustain without imposing a fixed
+wait. Works well when the processing function is slower than the item rate.
+
+**When not to use:** latency-sensitive paths at low concurrency, where
+drain mode's "fire after processing" rhythm introduces variable delays.
+
+### Tick mode — `SetTickInterval(d)`
+
+When tick mode is on, the worker fires the current batch on every tick of a
+`time.Ticker` with period `d`, regardless of how many items have accumulated.
+Empty ticks are skipped — no fn call, no span, no metric. The size cap still
+causes an early flush; `Trigger()` still works.
+
+```go
+b := batcher.New[string](1000, 0, processFn, true)
+b.SetTickInterval(10 * time.Millisecond) // must be called before items are added
+```
+
+**When to use:** latency-sensitive paths at low-to-moderate concurrency.
+Particularly effective in multi-stage pipelines where each stage uses its own
+batcher — a lazy per-item timer in each stage compounds into large end-to-end
+latency, while a shared tick interval keeps the pipeline moving steadily.
+
+**When not to use:** high-concurrency saturated workloads where batches
+consistently fill on the size cap before any tick would fire. There the ticker
+adds scheduling overhead without batching benefit.
+
+**Interaction with `SetMaxConcurrent`:** under pool saturation (all workers
+busy), ticks are silently dropped — Go's `time.Ticker.C` has a depth-1 buffer,
+so the effective flush rate caps at pool throughput rather than tick rate.
+
+### Mutual exclusion
+
+Tick mode and drain mode cannot be active at the same time. Calling
+`SetTickInterval` while drain mode is on is a no-op (logs a warning). Calling
+`SetDrainMode(true)` while tick mode is on is a no-op (logs a warning). Once
+tick mode is enabled it cannot be disabled — call `Close` to tear the batcher down.
+
+<br/>
+
 ## 📚 Documentation
 
 - **API Reference** – Dive into the godocs at [pkg.go.dev/github.com/bsv-blockchain/go-batcher](https://pkg.go.dev/github.com/bsv-blockchain/go-batcher)
