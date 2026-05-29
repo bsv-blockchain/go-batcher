@@ -141,6 +141,17 @@ type Batcher[T any] struct {
 	// The worker goroutine is the sole sender; close happens after final-batch
 	// flush in the shutdown branch.
 	workCh chan workItem[T]
+
+	// tickInterval enables fixed-interval ("steady cadence") trigger mode when > 0.
+	// Set via SetTickInterval. When wired, the worker fires the current batch every
+	// tickInterval regardless of size (empty ticks are skipped) and the lazy first-item
+	// timeout is suppressed. Mutually exclusive with drain mode.
+	tickInterval time.Duration
+	// ticker holds the active *time.Ticker when tick mode is enabled, nil otherwise.
+	// Loaded by the worker once per outer loop iteration so callers may install the
+	// ticker via SetTickInterval at any time without a data race. Atomic load on the
+	// hot path is a sub-nanosecond cost.
+	ticker atomic.Pointer[time.Ticker]
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -350,6 +361,10 @@ func (b *Batcher[T]) Close() {
 // at low throughput, batches are small (even single-item) with near-zero latency;
 // at high throughput, batches grow larger as more items queue during processing.
 func (b *Batcher[T]) SetDrainMode(enabled bool) {
+	if enabled && b.ticker.Load() != nil {
+		b.cfg.logger.Warnf("batcher %q: SetDrainMode(true) rejected — tick mode is enabled", b.cfg.name)
+		return
+	}
 	b.drainMode.Store(enabled)
 }
 
@@ -390,6 +405,36 @@ func (b *Batcher[T]) SetMaxConcurrent(n int) {
 	}
 }
 
+// SetTickInterval enables fixed-interval ("steady cadence") trigger mode.
+//
+// When d > 0, the worker fires the current batch every d regardless of how
+// many items have accumulated since the previous flush. Empty ticks are
+// skipped — no fn call, no span, no metric. The size cap still causes an
+// early flush, and Trigger() still works.
+//
+// SetTickInterval is mutually exclusive with drain mode: enabling tick mode
+// while drain mode is on logs a warning and is a no-op. Once enabled, tick
+// mode supersedes the constructor's timeout argument — the lazy first-item
+// timer is no longer activated.
+//
+// Must be called before items are added to the batcher. Synchronization with
+// the worker goroutine is established via the happens-before relationship on
+// the first Put (the channel send that follows configuration), matching the
+// contract used by SetMaxConcurrent. Passing d <= 0 is a no-op; tick mode
+// cannot be disabled once enabled — call Close to tear the batcher down.
+func (b *Batcher[T]) SetTickInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if b.drainMode.Load() {
+		b.cfg.logger.Warnf("batcher %q: SetTickInterval rejected — drain mode is enabled", b.cfg.name)
+		return
+	}
+	b.tickInterval = d
+	b.ticker.Store(time.NewTicker(d))
+	b.cfg.logger.Infof("batcher %q: tick mode enabled, interval=%s", b.cfg.name, d)
+}
+
 // worker is the core processing loop that manages batch aggregation and processing.
 //
 // This function runs as a background goroutine and continuously monitors three conditions
@@ -428,7 +473,16 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 		if timer != nil {
 			timer.Stop()
 		}
+		if t := b.ticker.Load(); t != nil {
+			t.Stop()
+		}
 	}()
+
+	// tickerCh is a worker-local channel derived from b.ticker.Load().C. It starts
+	// nil (disabling the ticker select arm) and is resolved on the first b.ch receive
+	// via an atomic load — preserving the same "nil until first item" semantics as the
+	// previous localTickerCh snapshot approach while dropping the boolean flag.
+	var tickerCh <-chan time.Time
 
 	for {
 		var reason string
@@ -461,6 +515,16 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
 			}
 
+			// Resolve tickerCh from the atomic pointer on first (and subsequent)
+			// item receives. Using atomic.Load here is race-safe without a boolean
+			// flag: the caller's SetTickInterval write is visible by the time any
+			// Put completes (Put → b.ch send establishes happens-before).
+			if tickerCh == nil {
+				if t := b.ticker.Load(); t != nil {
+					tickerCh = t.C
+				}
+			}
+
 			if b.drainMode.Load() {
 				// Drain all available items up to size cap, then fire immediately.
 				for len(b.batch) < b.size {
@@ -482,8 +546,9 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			// Lazy timer activation: start on first item only. Reuse the same
 			// Timer across batches to avoid a per-batch allocation; safe under
 			// Go 1.23+ semantics where Reset on a stopped/expired timer will
-			// not deliver a stale value.
-			if len(b.batch) == 1 {
+			// not deliver a stale value. Skipped when tick mode is wired —
+			// the tickerCh arm below drives all time-based flushes.
+			if len(b.batch) == 1 && tickerCh == nil {
 				if timer == nil {
 					timer = time.NewTimer(b.timeout)
 				} else {
@@ -506,11 +571,40 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			reason = ReasonTimeout
 			goto saveBatch
 
+		case <-tickerCh: // nil channel blocks forever when tick mode disabled.
+			if len(b.batch) == 0 {
+				// Skip empty tick — no fn call, no span, no metric.
+				continue
+			}
+			reason = ReasonTimeout
+			goto saveBatch
+
 		case <-b.triggerCh:
 			if timer != nil {
 				timer.Stop()
 				timerCh = nil
 			}
+			// Non-blocking drain: if Trigger() raced ahead of a buffered Put, pull
+			// any immediately-available items (up to the size cap) so they are
+			// included in this flush rather than stranded until the next tick.
+			for len(b.batch) < b.size {
+				select {
+				case env := <-b.ch:
+					b.batch = append(b.batch, env.item)
+					if env.sc.IsValid() {
+						batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+					}
+					// Resolve tickerCh if not yet done (same logic as b.ch arm above).
+					if tickerCh == nil {
+						if t := b.ticker.Load(); t != nil {
+							tickerCh = t.C
+						}
+					}
+				default:
+					goto afterDrain
+				}
+			}
+		afterDrain:
 			reason = ReasonManual
 			goto saveBatch
 		}

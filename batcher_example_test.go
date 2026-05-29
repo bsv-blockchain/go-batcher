@@ -3,6 +3,7 @@ package batcher_test
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/bsv-blockchain/go-batcher/v2"
@@ -295,4 +296,32 @@ func Example_eventAggregation() {
 	//   click: 1 occurrences
 	//   scroll: 1 occurrences
 	//   view: 2 occurrences
+}
+
+// ExampleBatcher_SetTickInterval shows fixed-interval ("steady cadence")
+// trigger mode. The batcher fires every 20 ms regardless of how many items
+// have accumulated since the previous flush (empty ticks are skipped).
+// The size cap still flushes early when reached.
+func ExampleBatcher_SetTickInterval() {
+	var got int
+	var wg sync.WaitGroup
+	wg.Add(3) // expect three items to flow through
+
+	b := batcher.New[int](100, time.Hour, func(batch []*int) {
+		for _, p := range batch {
+			got += *p
+			wg.Done()
+		}
+	}, false)
+	b.SetTickInterval(20 * time.Millisecond)
+	defer b.Close()
+
+	one, two, three := 1, 2, 3
+	b.Put(&one)
+	b.Put(&two)
+	b.Put(&three)
+	wg.Wait()
+
+	fmt.Println("sum:", got)
+	// Output: sum: 6
 }
