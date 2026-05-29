@@ -361,6 +361,10 @@ func (b *Batcher[T]) Close() {
 // at low throughput, batches are small (even single-item) with near-zero latency;
 // at high throughput, batches grow larger as more items queue during processing.
 func (b *Batcher[T]) SetDrainMode(enabled bool) {
+	if enabled && b.ticker.Load() != nil {
+		b.cfg.logger.Warnf("batcher %q: SetDrainMode(true) rejected — tick mode is enabled", b.cfg.name)
+		return
+	}
 	b.drainMode.Store(enabled)
 }
 
