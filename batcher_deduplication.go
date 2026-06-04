@@ -767,6 +767,7 @@ func NewWithDeduplication[T comparable](size int, timeout time.Duration, fn func
 			background: background,
 			usePool:    false,
 			done:       make(chan struct{}),
+			finished:   make(chan struct{}),
 			cfg:        applyOptions(opts),
 		},
 		deduplicationWindow: deduplicationWindow,
@@ -794,6 +795,7 @@ func NewWithDeduplicationAndPool[T comparable](size int, timeout time.Duration, 
 			background: background,
 			usePool:    true,
 			done:       make(chan struct{}),
+			finished:   make(chan struct{}),
 			pool: &sync.Pool{
 				New: func() interface{} {
 					slice := make([]*T, 0, size)

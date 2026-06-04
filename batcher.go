@@ -152,6 +152,24 @@ type Batcher[T any] struct {
 	// ticker via SetTickInterval at any time without a data race. Atomic load on the
 	// hot path is a sub-nanosecond cost.
 	ticker atomic.Pointer[time.Ticker]
+
+	// finished is closed by the worker goroutine when it has fully returned —
+	// i.e. after the shutdown drain has dispatched the residual batch AND all
+	// background dispatch goroutines have completed (see inflight). Close()
+	// blocks on this channel so callers can rely on every queued item having
+	// been handed to fn before Close returns.
+	finished chan struct{}
+	// inflight counts background batch dispatches that run on goroutines other
+	// than the worker (the fresh-goroutine paths and the persistent worker
+	// pool). The worker waits on it during shutdown so Close does not return
+	// while a background fn call is still writing. Add happens on the worker
+	// goroutine before the dispatch is handed off; Done happens when fn
+	// returns. Synchronous dispatches (non-background, and the shutdown drain
+	// itself) run inline on the worker and need no tracking.
+	inflight sync.WaitGroup
+	// closeOnce guards close(done) so Close is idempotent — a second call must
+	// not panic with "close of closed channel".
+	closeOnce sync.Once
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -191,6 +209,7 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 		background: background,
 		usePool:    false,
 		done:       make(chan struct{}),
+		finished:   make(chan struct{}),
 		cfg:        applyOptions(opts),
 	}
 
@@ -230,8 +249,9 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 				return &slice
 			},
 		},
-		done: make(chan struct{}),
-		cfg:  applyOptions(opts),
+		done:     make(chan struct{}),
+		finished: make(chan struct{}),
+		cfg:      applyOptions(opts),
 	}
 
 	go b.worker()
@@ -342,13 +362,26 @@ func (b *Batcher[T]) Trigger() {
 //   - The internal channel is closed after draining, preventing further Put() calls
 //
 // Notes:
-//   - This method returns immediately without waiting for shutdown to complete
+//   - This method BLOCKS until shutdown is complete: the worker has drained the
+//     channel, dispatched the residual batch through fn, and every background
+//     dispatch goroutine has finished. On return, all items accepted before
+//     Close have been handed to fn. Bound the wait with your own timeout
+//     (e.g. run Close in a goroutine and select on a context) if fn can hang.
+//   - Close is idempotent: calling it more than once is safe and will not panic.
+//     Concurrent callers all block until shutdown completes.
 //
 // IMPORTANT: Do not call Put() / PutCtx() after Close() has been called. The
 // channel is closed during shutdown, and any further send will panic with
 // "send on closed channel". Callers must ensure proper synchronization.
 func (b *Batcher[T]) Close() {
-	close(b.done)
+	b.closeOnce.Do(func() {
+		close(b.done)
+	})
+	// Wait for the worker to fully unwind. finished is closed only after the
+	// shutdown drain and inflight.Wait() in worker(), so a returned Close
+	// guarantees every queued item has been handed to fn. Receiving from a
+	// closed channel returns immediately, so repeat/concurrent callers are fine.
+	<-b.finished
 }
 
 // SetDrainMode enables or disables drain mode.
@@ -400,6 +433,9 @@ func (b *Batcher[T]) SetMaxConcurrent(n int) {
 					b.pool.Put(&slice)
 				}
 				b.cfg.metricsBound.WorkerFinished()
+				// Pairs with the inflight.Add issued by the worker before it
+				// handed this batch over the rendezvous channel.
+				b.inflight.Done()
 			}
 		}()
 	}
@@ -468,6 +504,13 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 	var timer *time.Timer
 	var timerCh <-chan time.Time // nil channel blocks forever, enabling lazy timer activation
 	var batchLinks []trace.Link
+
+	// Registered first so they run last (LIFO): on any worker return, first
+	// wait for outstanding background dispatches to finish (inflight), then
+	// signal Close() that shutdown is fully complete (finished). This pairing
+	// is what lets Close block until every queued item has been handed to fn.
+	defer close(b.finished)
+	defer b.inflight.Wait()
 
 	defer func() {
 		if timer != nil {
@@ -617,6 +660,13 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			links := batchLinks
 
 			if b.background {
+				// Track this dispatch so the shutdown drain (inflight.Wait in
+				// worker) blocks until fn has actually run. Add is always on the
+				// worker goroutine, so it never races the Wait that also runs
+				// there; Done is paired below (persistent worker, fresh
+				// goroutine, or the inline shutdown path).
+				b.inflight.Add(1)
+
 				if b.workCh != nil {
 					// Hand the batch to a persistent worker. The unbuffered
 					// channel blocks here when all N workers are busy,
@@ -627,6 +677,7 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 						if wait := time.Since(semStart); wait > time.Microsecond {
 							b.cfg.metricsBound.BackpressureWait(wait)
 						}
+						// persistent worker calls inflight.Done after dispatch
 					case <-b.done:
 						// Shutdown while waiting for a worker — process synchronously.
 						b.cfg.logger.Warnf("batcher %q: dispatching batch of %d items inline due to shutdown while waiting for worker slot", b.cfg.name, len(batch))
@@ -635,17 +686,20 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 							slice := batch[:0]
 							b.pool.Put(&slice)
 						}
+						b.inflight.Done()
 						return
 					}
 				} else if b.usePool {
 					// Unbounded concurrency path: spawn a fresh goroutine per batch.
 					go func(batch []*T, links []trace.Link, reason string) {
+						defer b.inflight.Done()
 						b.dispatchAndRecord(batch, links, reason)
 						slice := batch[:0]
 						b.pool.Put(&slice)
 					}(batch, links, reason)
 				} else {
 					go func(batch []*T, links []trace.Link, reason string) {
+						defer b.inflight.Done()
 						b.dispatchAndRecord(batch, links, reason)
 					}(batch, links, reason)
 				}
