@@ -125,17 +125,14 @@ func TestSetMaxConcurrent_NoWorkerLeakOnShutdownRace(t *testing.T) {
 		"persistent pool workers must exit after Close (workCh closed on every worker exit)")
 }
 
-// TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad covers the P0 where the
-// greedy-accumulate inner drain loop never returned to the outer select while
-// the channel stayed non-empty, starving Trigger()/timers/Close() for seconds
-// under sustained producer load.
-func TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad(t *testing.T) {
-	// size=1 plus a per-flush cost slower than the producers keeps the channel
-	// continuously non-empty, so the buggy inner loop never hits its empty
-	// (default) arm and never returns to the outer select.
-	b := New[int](1, time.Hour, func(_ []*int) {
-		time.Sleep(time.Millisecond)
-	}, false, WithGreedyAccumulate(true))
+// assertTriggerNotStarvedUnderLoad drives 32 producers hammering Put() and
+// asserts Trigger() is serviced within a generous bound. Before the fix, the
+// greedy/drain inner loop kept consuming a continuously non-empty channel
+// without returning to the outer select, starving Trigger()/timers/Close() for
+// seconds. b must be a size=1 batcher whose fn is slow enough that producers
+// keep the channel saturated (so the buggy loop never hits its empty arm).
+func assertTriggerNotStarvedUnderLoad(t *testing.T, b *Batcher[int], mode string) {
+	t.Helper()
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -168,7 +165,7 @@ func TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad(t *testing.T) {
 		close(stop)
 		wg.Wait()
 		b.Close()
-		t.Fatal("Trigger() starved by the greedy-accumulate inner loop under sustained load")
+		t.Fatalf("Trigger() starved by the %s inner loop under sustained load", mode)
 	}
 
 	close(stop)
@@ -176,52 +173,25 @@ func TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad(t *testing.T) {
 	b.Close()
 }
 
-// TestDrainMode_DoesNotStarveTriggerUnderLoad is the drain-mode counterpart of
-// the greedy starvation test: the drain inner loop must also yield to the outer
-// select promptly under sustained load.
+// TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad covers the P0 where the
+// greedy-accumulate inner drain loop never returned to the outer select while
+// the channel stayed non-empty, starving Trigger()/timers/Close() for seconds
+// under sustained producer load.
+func TestGreedyAccumulate_DoesNotStarveTriggerUnderLoad(t *testing.T) {
+	b := New[int](1, time.Hour, func(_ []*int) {
+		time.Sleep(time.Millisecond)
+	}, false, WithGreedyAccumulate(true))
+	assertTriggerNotStarvedUnderLoad(t, b, "greedy-accumulate")
+}
+
+// TestDrainMode_DoesNotStarveTriggerUnderLoad is the drain-mode counterpart:
+// the drain inner loop must also yield to the outer select promptly under load.
 func TestDrainMode_DoesNotStarveTriggerUnderLoad(t *testing.T) {
 	b := New[int](1, time.Hour, func(_ []*int) {
 		time.Sleep(time.Millisecond)
 	}, false)
 	b.SetDrainMode(true)
-
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			v := 0
-			for {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				b.Put(&v)
-			}
-		}()
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	triggered := make(chan struct{})
-	go func() {
-		b.Trigger()
-		close(triggered)
-	}()
-
-	select {
-	case <-triggered:
-	case <-time.After(2 * time.Second):
-		close(stop)
-		wg.Wait()
-		b.Close()
-		t.Fatal("Trigger() starved by the drain-mode inner loop under sustained load")
-	}
-
-	close(stop)
-	wg.Wait()
-	b.Close()
+	assertTriggerNotStarvedUnderLoad(t, b, "drain-mode")
 }
 
 // TestPutBatch_SnapshotsCallerSlice covers the P1 where PutBatch retained the
