@@ -126,19 +126,20 @@ type workItem[T any] struct {
 //   - Items are passed by pointer to avoid copying
 //   - The internal worker goroutine runs indefinitely until Close() is called
 type Batcher[T any] struct {
-	fn            func([]*T)
-	size          int
-	timeout       time.Duration
-	batch         []*T
-	ch            chan itemEnvelope[T]
-	triggerCh     chan struct{}
-	background    bool
-	usePool       bool
-	pool          *sync.Pool
-	done          chan struct{}
-	drainMode     atomic.Bool
-	maxConcurrent int
-	cfg           *config
+	fn               func([]*T)
+	size             int
+	timeout          time.Duration
+	batch            []*T
+	ch               chan itemEnvelope[T]
+	triggerCh        chan struct{}
+	background       bool
+	usePool          bool
+	pool             *sync.Pool
+	done             chan struct{}
+	drainMode        atomic.Bool
+	greedyAccumulate atomic.Bool
+	maxConcurrent    int
+	cfg              *config
 	// workCh is non-nil iff SetMaxConcurrent(n>0) was called. When non-nil,
 	// the worker dispatches batches to a fixed pool of N persistent goroutines
 	// over an unbuffered (rendezvous) channel — sender blocks until a worker
@@ -217,6 +218,9 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 		finished:   make(chan struct{}),
 		cfg:        applyOptions(opts),
 	}
+	if b.cfg.greedyAccumulate {
+		b.greedyAccumulate.Store(true)
+	}
 
 	go b.worker()
 
@@ -257,6 +261,9 @@ func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), ba
 		done:     make(chan struct{}),
 		finished: make(chan struct{}),
 		cfg:      applyOptions(opts),
+	}
+	if b.cfg.greedyAccumulate {
+		b.greedyAccumulate.Store(true)
 	}
 
 	go b.worker()
@@ -448,7 +455,37 @@ func (b *Batcher[T]) SetDrainMode(enabled bool) {
 		b.cfg.logger.Warnf("batcher %q: SetDrainMode(true) rejected — tick mode is enabled", b.cfg.name)
 		return
 	}
+	if enabled && b.greedyAccumulate.Load() {
+		b.cfg.logger.Warnf("batcher %q: SetDrainMode(true) rejected — greedy accumulate is enabled", b.cfg.name)
+		return
+	}
 	b.drainMode.Store(enabled)
+}
+
+// SetGreedyAccumulate enables or disables greedy accumulate mode.
+//
+// When enabled, after receiving an item the worker opportunistically drains
+// any additional items already waiting on the channel (up to the size cap)
+// into the SAME batch before re-entering select — trading a per-item 5-arm
+// select for a cheap non-blocking 2-arm receive for every item after the
+// first in a burst. Unlike drain mode, greedy accumulate never fires a
+// batch early: it only changes how quickly items already queued are pulled
+// off the channel between the existing size/timeout/trigger flush points.
+// A batch under greedy accumulate is never smaller than the same arrival
+// pattern would produce without it.
+//
+// Mutually exclusive with drain mode (which does fire early): enabling
+// either while the other is on logs a warning and is a no-op, matching
+// SetDrainMode's existing exclusion with tick mode. Safe to call at
+// construction via WithGreedyAccumulate or afterward via this method,
+// though changing it once items are already flowing does not retroactively
+// affect an in-progress accumulation cycle.
+func (b *Batcher[T]) SetGreedyAccumulate(enabled bool) {
+	if enabled && b.drainMode.Load() {
+		b.cfg.logger.Warnf("batcher %q: SetGreedyAccumulate(true) rejected — drain mode is enabled", b.cfg.name)
+		return
+	}
+	b.greedyAccumulate.Store(enabled)
 }
 
 // SetMaxConcurrent limits the number of concurrent in-flight background batch
@@ -846,6 +883,36 @@ workerLoop:
 			batchLinks, flushedDuringAppend, exit = b.appendItems(items, batchLinks)
 			if exit {
 				return
+			}
+
+			if b.greedyAccumulate.Load() {
+				// Opportunistically pull additional already-queued items into
+				// this same cycle without blocking and without firing early
+				// (unlike drain mode's `default` arm, this loop never flushes
+				// on an empty channel — it only stops trying). Each pulled
+				// envelope still goes through appendItems, so oversized
+				// PutBatch groups keep splitting at the cap exactly as above.
+			greedyDrain:
+				for len(b.batch) < b.size {
+					select {
+					case greedyEnv := <-b.ch:
+						if greedyEnv.sc.IsValid() {
+							batchLinks = append(batchLinks, trace.Link{SpanContext: greedyEnv.sc})
+						}
+						gItems := greedyEnv.items
+						if gItems == nil {
+							gItems = []*T{greedyEnv.item}
+						}
+						var gFlushed bool
+						batchLinks, gFlushed, exit = b.appendItems(gItems, batchLinks)
+						flushedDuringAppend = flushedDuringAppend || gFlushed
+						if exit {
+							return
+						}
+					default:
+						break greedyDrain
+					}
+				}
 			}
 
 			switch {

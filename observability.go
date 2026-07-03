@@ -85,6 +85,12 @@ type config struct {
 	metricsBound BoundMetrics
 	tracer       trace.Tracer
 	name         string
+	// greedyAccumulate seeds the Batcher's runtime greedyAccumulate flag at
+	// construction time. It is a plain bool (not atomic) because config is
+	// fully resolved by applyOptions before the worker goroutine starts and
+	// is never mutated afterward — see SetGreedyAccumulate for the
+	// post-construction, mutually-exclusive-with-drain-mode toggle.
+	greedyAccumulate bool
 }
 
 func defaultConfig() *config {
@@ -156,6 +162,17 @@ func WithName(name string) Option {
 		if name != "" {
 			c.name = name
 		}
+	}
+}
+
+// WithGreedyAccumulate seeds the Batcher's greedy-accumulate flag at
+// construction time — a convenience equivalent to calling
+// SetGreedyAccumulate(enabled) immediately after construction, before any
+// items are enqueued. See SetGreedyAccumulate for the full behavior and its
+// mutual exclusion with drain mode.
+func WithGreedyAccumulate(enabled bool) Option {
+	return func(c *config) {
+		c.greedyAccumulate = enabled
 	}
 }
 
