@@ -79,9 +79,14 @@ var errBatchPanic = errors.New("batcher: panic in batch fn")
 // captured at PutCtx time. The SpanContext is a 24-byte value type, so the
 // envelope adds bounded memory overhead per channel slot. An invalid (zero)
 // SpanContext means no span link will be emitted for this item.
+//
+// items is non-nil for envelopes enqueued via PutBatch/PutBatchCtx and holds
+// the whole group; item is unused in that case. Exactly one of item/items is
+// populated per envelope.
 type itemEnvelope[T any] struct {
-	item *T
-	sc   trace.SpanContext
+	item  *T
+	items []*T
+	sc    trace.SpanContext
 }
 
 // workItem is the payload handed from the worker goroutine to the persistent
@@ -304,9 +309,54 @@ func (b *Batcher[T]) PutCtx(ctx context.Context, item *T, _ ...int) {
 	})
 }
 
-// enqueue is the shared hot path for Put and PutCtx. It tries a non-blocking
-// channel send first and only times the blocking fallback when the buffer is
-// full so the common case is allocation- and timer-free.
+// PutBatch adds a group of items to the batcher in a single channel send,
+// instead of one send per item. This is the multi-item counterpart to Put:
+// use it when a caller already has N items ready together (e.g. all inputs
+// of one transaction) to cut the per-item channel-lock and collector-select
+// overhead down to a single operation for the whole group.
+//
+// The group is treated as an ordered unit by the collector: if it is smaller
+// than the configured batch size it simply accumulates like N individual
+// Put calls; if appending it would exceed the size cap, the collector splits
+// it into full-size batches (each dispatched immediately, in order) plus at
+// most one trailing partial batch that continues accumulating normally.
+// Batch size is always honored — a PutBatch call never produces a batch
+// larger than the batcher's configured size, even when len(items) > size.
+//
+// Use PutBatchCtx instead if you have an active OpenTelemetry span context
+// you want linked to the eventual batch span(s). Passing a nil or empty
+// slice is a no-op.
+//
+// Parameters:
+//   - items: The group of items to enqueue together. Must not contain nil pointers.
+//   - _: Variadic int parameter for payload size (ignored, kept for API compatibility)
+func (b *Batcher[T]) PutBatch(items []*T, _ ...int) {
+	if len(items) == 0 {
+		return
+	}
+	b.enqueue(itemEnvelope[T]{items: items})
+}
+
+// PutBatchCtx is like PutBatch but captures the SpanContext from ctx so the
+// batch span(s) produced from this group carry it as a link. When a group
+// larger than the batch size is split into multiple dispatched batches (see
+// PutBatch), only the first resulting batch carries the link — see the
+// package-level notes on split batches. If ctx has no active span the call
+// behaves identically to PutBatch.
+func (b *Batcher[T]) PutBatchCtx(ctx context.Context, items []*T, _ ...int) {
+	if len(items) == 0 {
+		return
+	}
+	b.enqueue(itemEnvelope[T]{
+		items: items,
+		sc:    trace.SpanContextFromContext(ctx),
+	})
+}
+
+// enqueue is the shared hot path for Put/PutCtx/PutBatch/PutBatchCtx. It
+// tries a non-blocking channel send first and only times the blocking
+// fallback when the buffer is full so the common case is allocation- and
+// timer-free.
 func (b *Batcher[T]) enqueue(env itemEnvelope[T]) {
 	b.cfg.metricsBound.Enqueued()
 	select {
@@ -471,6 +521,160 @@ func (b *Batcher[T]) SetTickInterval(d time.Duration) {
 	b.cfg.logger.Infof("batcher %q: tick mode enabled, interval=%s", b.cfg.name, d)
 }
 
+// flushBatch dispatches the current batch (if non-empty) via fn — following
+// the background/pool/workCh dispatch rules the Batcher was configured with
+// — and resets b.batch (and returns a fresh nil batchLinks) for the next
+// accumulation cycle.
+//
+// This is the batch-dispatch step formerly inlined at the worker's
+// goto-target "saveBatch" label. It is factored into a callable method so a
+// single b.ch receive carrying multiple items (PutBatch/PutBatchCtx) can
+// flush more than once — at each size-cap boundary — without leaving the
+// select statement between flushes (see appendItems).
+//
+// Returns exit=true in the one case that mirrors the original inline
+// behavior of returning from worker() directly: shutdown (b.done closing)
+// raced ahead of a free slot in the SetMaxConcurrent worker pool. The batch
+// is still dispatched synchronously in that case; exit simply tells the
+// caller (worker's select-loop body) to stop processing and let worker()
+// return, exactly as the original `return` statement did at that call site.
+func (b *Batcher[T]) flushBatch(reason string, batchLinks []trace.Link) (newBatchLinks []trace.Link, exit bool) { //nolint:gocognit,gocyclo // Extracted verbatim from worker()'s former saveBatch label; the branching (background/pool/workCh/shutdown-race) is inherent to the dispatch contract, not incidental
+	if len(b.batch) == 0 {
+		return batchLinks, false
+	}
+
+	batch := b.batch
+	links := batchLinks
+
+	if b.background { //nolint:nestif // Necessary complexity for handling pooling and background modes
+		// Track this dispatch so the shutdown drain (inflight.Wait in worker)
+		// blocks until fn has actually run. Add is always on the worker
+		// goroutine, so it never races the Wait that also runs there; Done is
+		// paired below (persistent worker, fresh goroutine, or the inline
+		// shutdown path).
+		b.inflight.Add(1)
+
+		if b.workCh != nil {
+			// Hand the batch to a persistent worker. The unbuffered channel
+			// blocks here when all N workers are busy, applying backpressure
+			// up through b.ch and Put()/PutBatch().
+			semStart := time.Now()
+			select {
+			case b.workCh <- workItem[T]{batch: batch, links: links, reason: reason}:
+				if wait := time.Since(semStart); wait > time.Microsecond {
+					b.cfg.metricsBound.BackpressureWait(wait)
+				}
+				// persistent worker calls inflight.Done after dispatch
+			case <-b.done:
+				// Shutdown while waiting for a worker — process synchronously,
+				// then signal the caller to stop (mirrors the original inline
+				// `return` from worker() at this exact point).
+				b.cfg.logger.Warnf("batcher %q: dispatching batch of %d items inline due to shutdown while waiting for worker slot", b.cfg.name, len(batch))
+				b.dispatchAndRecord(batch, links, reason)
+				if b.usePool {
+					slice := batch[:0]
+					b.pool.Put(&slice)
+				}
+				b.inflight.Done()
+				return nil, true
+			}
+		} else if b.usePool {
+			// Unbounded concurrency path: spawn a fresh goroutine per batch.
+			go func(batch []*T, links []trace.Link, reason string) {
+				defer b.inflight.Done()
+				b.dispatchAndRecord(batch, links, reason)
+				slice := batch[:0]
+				b.pool.Put(&slice)
+			}(batch, links, reason)
+		} else {
+			go func(batch []*T, links []trace.Link, reason string) {
+				defer b.inflight.Done()
+				b.dispatchAndRecord(batch, links, reason)
+			}(batch, links, reason)
+		}
+	} else {
+		b.dispatchAndRecord(batch, links, reason)
+		if b.usePool {
+			slice := batch[:0]
+			b.pool.Put(&slice)
+		}
+	}
+
+	// Reset for the next batch. We must not reuse the underlying arrays of
+	// `batch` / `links` because background dispatch may still be reading
+	// them — allocate fresh slices instead. The pool path takes care of
+	// `batch` separately.
+	if b.usePool {
+		newBatchPtr := b.pool.Get().(*[]*T)
+		b.batch = *newBatchPtr
+	} else {
+		b.batch = make([]*T, 0, b.size)
+	}
+
+	return nil, false
+}
+
+// appendItems appends items to the current batch, splitting into full
+// dispatches of exactly b.size whenever a single PutBatch/PutBatchCtx
+// envelope contains more items than currently fit. Each full split is
+// flushed immediately via flushBatch, so a batch handed to fn is never
+// larger than the configured size — even when a caller enqueues an
+// over-sized group in one call. At most one trailing partial batch remains
+// in b.batch, accumulating normally toward the next size/timeout/trigger
+// flush.
+//
+// batchLinks is expected to already include this envelope's span link (if
+// any) before this call: the link is not duplicated across split boundaries,
+// so it travels with whichever batch happens to be open when this call
+// begins — either the first full split produced here, or the trailing
+// partial batch if no split was needed.
+//
+// flushed reports whether at least one internal flush happened. Callers that
+// manage the lazy timeout timer need this: if a flush occurred, any items
+// left in b.batch afterward began a brand-new accumulation cycle *during*
+// this call (not before it), so the timer must be (re-)armed for them even
+// though b.batch was already non-empty when appendItems was called — the
+// "was empty on entry" test alone is not sufficient once a mid-call flush
+// can happen. See the worker() call site.
+//
+// If flushBatch reports exit=true (shutdown raced a full worker pool), this
+// stops immediately and propagates it — mirroring the original single-item
+// saveBatch behavior of returning from worker() at that point.
+func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link) (newBatchLinks []trace.Link, flushed bool, exit bool) { //nolint:gocognit // Split-at-cap loop with an early-exit propagation path; each branch is a single guarded step
+	for len(items) > 0 {
+		room := b.size - len(b.batch)
+		if room <= 0 {
+			// Defensive: b.batch should never already be at/over size here
+			// (the loop below always flushes the instant it reaches size),
+			// but guard against stalling if that invariant is ever violated.
+			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
+			flushed = true
+			if exit {
+				return batchLinks, flushed, true
+			}
+			room = b.size
+		}
+
+		n := len(items)
+		if n > room {
+			n = room
+		}
+
+		b.batch = append(b.batch, items[:n]...)
+		items = items[n:]
+
+		if len(b.batch) == b.size {
+			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
+			flushed = true
+			if exit {
+				return batchLinks, flushed, true
+			}
+		}
+	}
+
+	return batchLinks, flushed, false
+}
+
 // worker is the core processing loop that manages batch aggregation and processing.
 //
 // This function runs as a background goroutine and continuously monitors three conditions
@@ -494,16 +698,18 @@ func (b *Batcher[T]) SetTickInterval(d time.Duration) {
 //   - Uses slice pooling if enabled to reduce allocations
 //
 // Notes:
-//   - Uses goto for performance optimization to avoid deep nesting
-//   - Empty batches are not processed (checked before invoking fn)
+//   - Empty batches are not processed (checked inside flushBatch)
 //   - Reuses timers to reduce allocations and GC pressure
 //   - When usePool=true, manages slice lifecycle through sync.Pool for memory efficiency
 //   - Each batch dispatch is wrapped in defer/recover so a panic from the user fn is
 //     logged, recorded as a metric and span error, and the worker keeps running
+//   - A single b.ch receive can carry more than one item (PutBatch/PutBatchCtx);
+//     appendItems splits it across as many flushBatch calls as needed
 func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function handles multiple channels and conditions
 	var timer *time.Timer
 	var timerCh <-chan time.Time // nil channel blocks forever, enabling lazy timer activation
 	var batchLinks []trace.Link
+	var exit bool
 
 	// Registered first so they run last (LIFO): on any worker return, first
 	// wait for outstanding background dispatches to finish (inflight), then
@@ -527,15 +733,23 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 	// previous localTickerCh snapshot approach while dropping the boolean flag.
 	var tickerCh <-chan time.Time
 
+workerLoop:
 	for {
-		var reason string
-
 		select {
 		case <-b.done:
-			// Shutdown: drain channel and process remaining items.
+			// Shutdown: drain channel and process remaining items. This
+			// residual dispatch already ignores the size cap for ordinary
+			// single-item accumulation (it flushes whatever piled up between
+			// the done-signal and the channel fully draining), so a PutBatch
+			// envelope's items are simply appended in full here too — no
+			// splitting needed to match existing behavior.
 			close(b.ch)
 			for env := range b.ch {
-				b.batch = append(b.batch, env.item)
+				if env.items != nil {
+					b.batch = append(b.batch, env.items...)
+				} else {
+					b.batch = append(b.batch, env.item)
+				}
 				if env.sc.IsValid() {
 					batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
 				}
@@ -553,7 +767,6 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			return
 
 		case env := <-b.ch:
-			b.batch = append(b.batch, env.item)
 			if env.sc.IsValid() {
 				batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
 			}
@@ -568,30 +781,84 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				}
 			}
 
-			if b.drainMode.Load() {
-				// Drain all available items up to size cap, then fire immediately.
+			if b.drainMode.Load() { //nolint:nestif // Drain-then-fire loop with a nested non-blocking select; inherent to the drain-mode contract
+				// Drain all available items up to size cap, then fire
+				// immediately. appendItems may itself flush mid-drain if a
+				// PutBatch envelope fills to size, which is fine: the outer
+				// `for len(b.batch) < b.size` condition below just keeps
+				// draining into the (now fresh) batch.
+				items := env.items
+				if items == nil {
+					items = []*T{env.item}
+				}
+				batchLinks, _, exit = b.appendItems(items, batchLinks)
+				if exit {
+					return
+				}
+
 				for len(b.batch) < b.size {
 					select {
-					case env := <-b.ch:
-						b.batch = append(b.batch, env.item)
-						if env.sc.IsValid() {
-							batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+					case drainEnv := <-b.ch:
+						if drainEnv.sc.IsValid() {
+							batchLinks = append(batchLinks, trace.Link{SpanContext: drainEnv.sc})
+						}
+						items := drainEnv.items
+						if items == nil {
+							items = []*T{drainEnv.item}
+						}
+						batchLinks, _, exit = b.appendItems(items, batchLinks)
+						if exit {
+							return
 						}
 					default:
-						reason = ReasonDrain
-						goto saveBatch
+						batchLinks, exit = b.flushBatch(ReasonDrain, batchLinks)
+						if exit {
+							return
+						}
+						continue workerLoop
 					}
 				}
-				reason = ReasonDrain
-				goto saveBatch
+				batchLinks, exit = b.flushBatch(ReasonDrain, batchLinks)
+				if exit {
+					return
+				}
+				continue workerLoop
 			}
 
-			// Lazy timer activation: start on first item only. Reuse the same
-			// Timer across batches to avoid a per-batch allocation; safe under
-			// Go 1.23+ semantics where Reset on a stopped/expired timer will
-			// not deliver a stale value. Skipped when tick mode is wired —
-			// the tickerCh arm below drives all time-based flushes.
-			if len(b.batch) == 1 && tickerCh == nil {
+			// Lazy timer activation: (re-)start whenever a fresh accumulation
+			// cycle begins — either because the batch was empty when this
+			// envelope arrived, or because appendItems flushed a full batch
+			// partway through an over-sized PutBatch and left a trailing
+			// partial batch that just started accumulating *during* this
+			// call. Reuse the same Timer across batches to avoid a per-batch
+			// allocation; safe under Go 1.23+ semantics where Reset on a
+			// stopped/expired timer will not deliver a stale value. Skipped
+			// when tick mode is wired — the tickerCh arm below drives all
+			// time-based flushes.
+			batchWasEmpty := len(b.batch) == 0
+
+			items := env.items
+			if items == nil {
+				items = []*T{env.item}
+			}
+
+			var flushedDuringAppend bool
+			batchLinks, flushedDuringAppend, exit = b.appendItems(items, batchLinks)
+			if exit {
+				return
+			}
+
+			switch {
+			case len(b.batch) == 0:
+				// Fully flushed (single item, or an exact-multiple PutBatch)
+				// — nothing left accumulating, so any timer no longer applies.
+				if timer != nil {
+					timer.Stop()
+					timerCh = nil
+				}
+			case tickerCh == nil && (batchWasEmpty || flushedDuringAppend):
+				// A fresh cycle is accumulating as of right now: either this
+				// envelope started it from empty, or a mid-call flush did.
 				if timer == nil {
 					timer = time.NewTimer(b.timeout)
 				} else {
@@ -600,27 +867,22 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 				timerCh = timer.C
 			}
 
-			if len(b.batch) == b.size {
-				if timer != nil {
-					timer.Stop()
-					timerCh = nil
-				}
-				reason = ReasonSize
-				goto saveBatch
-			}
-
 		case <-timerCh: // Only fires when timerCh != nil (batch has items).
 			timerCh = nil
-			reason = ReasonTimeout
-			goto saveBatch
+			batchLinks, exit = b.flushBatch(ReasonTimeout, batchLinks)
+			if exit {
+				return
+			}
 
 		case <-tickerCh: // nil channel blocks forever when tick mode disabled.
 			if len(b.batch) == 0 {
 				// Skip empty tick — no fn call, no span, no metric.
 				continue
 			}
-			reason = ReasonTimeout
-			goto saveBatch
+			batchLinks, exit = b.flushBatch(ReasonTimeout, batchLinks)
+			if exit {
+				return
+			}
 
 		case <-b.triggerCh:
 			if timer != nil {
@@ -630,10 +892,10 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 			// Non-blocking drain: if Trigger() raced ahead of a buffered Put, pull
 			// any immediately-available items (up to the size cap) so they are
 			// included in this flush rather than stranded until the next tick.
+		triggerDrain:
 			for len(b.batch) < b.size {
 				select {
 				case env := <-b.ch:
-					b.batch = append(b.batch, env.item)
 					if env.sc.IsValid() {
 						batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
 					}
@@ -643,85 +905,22 @@ func (b *Batcher[T]) worker() { //nolint:gocognit,gocyclo // Worker function han
 							tickerCh = t.C
 						}
 					}
-				default:
-					goto afterDrain
-				}
-			}
-		afterDrain:
-			reason = ReasonManual
-			goto saveBatch
-		}
-
-		continue
-
-	saveBatch:
-		if len(b.batch) > 0 { //nolint:nestif // Necessary complexity for handling pooling and background modes
-			batch := b.batch
-			links := batchLinks
-
-			if b.background {
-				// Track this dispatch so the shutdown drain (inflight.Wait in
-				// worker) blocks until fn has actually run. Add is always on the
-				// worker goroutine, so it never races the Wait that also runs
-				// there; Done is paired below (persistent worker, fresh
-				// goroutine, or the inline shutdown path).
-				b.inflight.Add(1)
-
-				if b.workCh != nil {
-					// Hand the batch to a persistent worker. The unbuffered
-					// channel blocks here when all N workers are busy,
-					// applying backpressure up through b.ch and Put().
-					semStart := time.Now()
-					select {
-					case b.workCh <- workItem[T]{batch: batch, links: links, reason: reason}:
-						if wait := time.Since(semStart); wait > time.Microsecond {
-							b.cfg.metricsBound.BackpressureWait(wait)
-						}
-						// persistent worker calls inflight.Done after dispatch
-					case <-b.done:
-						// Shutdown while waiting for a worker — process synchronously.
-						b.cfg.logger.Warnf("batcher %q: dispatching batch of %d items inline due to shutdown while waiting for worker slot", b.cfg.name, len(batch))
-						b.dispatchAndRecord(batch, links, reason)
-						if b.usePool {
-							slice := batch[:0]
-							b.pool.Put(&slice)
-						}
-						b.inflight.Done()
+					items := env.items
+					if items == nil {
+						items = []*T{env.item}
+					}
+					batchLinks, _, exit = b.appendItems(items, batchLinks)
+					if exit {
 						return
 					}
-				} else if b.usePool {
-					// Unbounded concurrency path: spawn a fresh goroutine per batch.
-					go func(batch []*T, links []trace.Link, reason string) {
-						defer b.inflight.Done()
-						b.dispatchAndRecord(batch, links, reason)
-						slice := batch[:0]
-						b.pool.Put(&slice)
-					}(batch, links, reason)
-				} else {
-					go func(batch []*T, links []trace.Link, reason string) {
-						defer b.inflight.Done()
-						b.dispatchAndRecord(batch, links, reason)
-					}(batch, links, reason)
-				}
-			} else {
-				b.dispatchAndRecord(batch, links, reason)
-				if b.usePool {
-					slice := batch[:0]
-					b.pool.Put(&slice)
+				default:
+					break triggerDrain
 				}
 			}
-
-			// Reset for the next batch. We must not reuse the underlying
-			// arrays of `batch` / `links` because background dispatch may
-			// still be reading them — allocate fresh slices instead. The
-			// pool path takes care of `batch` separately.
-			if b.usePool {
-				newBatchPtr := b.pool.Get().(*[]*T)
-				b.batch = *newBatchPtr
-			} else {
-				b.batch = make([]*T, 0, b.size)
+			batchLinks, exit = b.flushBatch(ReasonManual, batchLinks)
+			if exit {
+				return
 			}
-			batchLinks = nil
 		}
 	}
 }

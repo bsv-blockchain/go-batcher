@@ -17,10 +17,15 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 )
+
+// ErrWaitTimeout is returned by Wait when timeout elapses before every item
+// in the Group completes. Use errors.Is to check for it.
+var ErrWaitTimeout = errors.New("completion: Wait timed out")
 
 // Group tracks N outstanding batch items belonging to one logical call. The
 // item that makes the counter reach zero closes done exactly once. Item
@@ -102,6 +107,6 @@ func (g *Group) Wait(ctx context.Context, timeout time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		return fmt.Errorf("completion: Wait timed out after %s", timeout)
+		return fmt.Errorf("%w after %s", ErrWaitTimeout, timeout)
 	}
 }

@@ -10,6 +10,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// errBenchmarkTimeout simulates the timeout error a real per-item protocol
+// site would return; a static error (rather than errors.New at the call
+// site) avoids allocating a new error value on every simulated timeout.
+var errBenchmarkTimeout = errors.New("timeout")
+
 // BenchmarkOldPerItemProtocol simulates the pre-Group completion protocol
 // this package replaces: one goroutine, one buffered channel, and one timer
 // per item, fanned out via an errgroup and joined with g.Wait.
@@ -32,7 +37,7 @@ func BenchmarkOldPerItemProtocol(b *testing.B) {
 				case err := <-errCh:
 					return err
 				case <-timer.C:
-					return errors.New("timeout")
+					return errBenchmarkTimeout
 				}
 			})
 		}

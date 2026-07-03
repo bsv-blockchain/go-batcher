@@ -97,6 +97,7 @@ func TestGroup_WaitReturnsErrorOnTimeout(t *testing.T) {
 
 	err := g.Wait(context.Background(), 10*time.Millisecond)
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWaitTimeout)
 
 	// Item never completed; a late Done must not panic or block.
 	g.Done()
@@ -153,6 +154,11 @@ func TestGroup_ManyGroupsManyItemsNoRace(t *testing.T) {
 	const groups = 50
 	const itemsPerGroup = 200
 
+	// Wait errors are collected here and asserted on the test goroutine
+	// (rather than inside the spawned goroutines) so require's t.FailNow
+	// only ever runs on the goroutine executing the test function.
+	errs := make(chan error, groups)
+
 	var wg sync.WaitGroup
 	for i := 0; i < groups; i++ {
 		wg.Add(1)
@@ -168,8 +174,13 @@ func TestGroup_ManyGroupsManyItemsNoRace(t *testing.T) {
 				}()
 			}
 			innerWg.Wait()
-			require.NoError(t, g.Wait(context.Background(), time.Second))
+			errs <- g.Wait(context.Background(), time.Second)
 		}()
 	}
 	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
 }
