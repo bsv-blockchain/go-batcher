@@ -165,6 +165,32 @@ func TestPrometheusMetricsPutBatchCountsItems(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "PutBatch of 7 items must increment enqueued_total by 7")
 }
 
+// TestPrometheusMetricsDrainModeSplitReason verifies that when an oversized
+// PutBatch is split during a drain-mode cycle, the resulting full batches are
+// labeled with the driving cycle's reason (drain) rather than always "size".
+func TestPrometheusMetricsDrainModeSplitReason(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics(reg, "test", "batch")
+
+	b := New[int](3, time.Hour, func(_ []*int) {}, false, WithName("alpha"), WithMetrics(m))
+	b.SetDrainMode(true)
+
+	items := make([]*int, 9) // exactly three size-3 splits
+	for i := range items {
+		v := i
+		items[i] = &v
+	}
+	b.PutBatch(items)
+
+	require.Eventually(t, func() bool {
+		return counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonDrain) == 3
+	}, time.Second, 10*time.Millisecond, "drain-mode PutBatch splits must be labeled drain")
+	assert.InDelta(t, 0, counterValue(t, reg, "test_batch_batches_total", "batcher", "alpha", "reason", ReasonSize), floatEpsilon,
+		"no split should be labeled size during a drain cycle")
+
+	b.Close()
+}
+
 func TestPrometheusMetricsSharedAcrossBatchers(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPrometheusMetrics(reg, "svc", "batcher")

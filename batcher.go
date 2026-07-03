@@ -730,17 +730,24 @@ func (b *Batcher[T]) flushBatch(reason string, batchLinks []trace.Link) (newBatc
 // "was empty on entry" test alone is not sufficient once a mid-call flush
 // can happen. See the worker() call site.
 //
+// reason is the trigger reason recorded on each internal (mid-split) flush, so
+// the caller's cycle semantics are preserved: the normal accumulation and
+// greedy paths pass ReasonSize (these splits fire because the batch reached the
+// cap), while the drain and trigger paths pass ReasonDrain / ReasonManual so a
+// PutBatch group split during those cycles is labeled by the cycle that drove
+// it rather than always as "size".
+//
 // If flushBatch reports exit=true (shutdown raced a full worker pool), this
 // stops immediately and propagates it — mirroring the original single-item
 // saveBatch behavior of returning from worker() at that point.
-func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link) (newBatchLinks []trace.Link, flushed bool, exit bool) { //nolint:gocognit // Split-at-cap loop with an early-exit propagation path; each branch is a single guarded step
+func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link, reason string) (newBatchLinks []trace.Link, flushed bool, exit bool) { //nolint:gocognit // Split-at-cap loop with an early-exit propagation path; each branch is a single guarded step
 	for len(items) > 0 {
 		room := b.size - len(b.batch)
 		if room <= 0 {
 			// Defensive: b.batch should never already be at/over size here
 			// (the loop below always flushes the instant it reaches size),
 			// but guard against stalling if that invariant is ever violated.
-			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
+			batchLinks, exit = b.flushBatch(reason, batchLinks)
 			flushed = true
 			if exit {
 				// flushBatch cleared b.batch on the shutdown-race path; keep the
@@ -761,7 +768,7 @@ func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link) (newBatchL
 		items = items[n:]
 
 		if len(b.batch) == b.size {
-			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
+			batchLinks, exit = b.flushBatch(reason, batchLinks)
 			flushed = true
 			if exit {
 				b.batch = append(b.batch, items...)
@@ -924,7 +931,7 @@ workerLoop:
 					items = []*T{env.item}
 				}
 				var dFlushed bool
-				batchLinks, dFlushed, exit = b.appendItems(items, batchLinks)
+				batchLinks, dFlushed, exit = b.appendItems(items, batchLinks, ReasonDrain)
 				if exit {
 					b.drainOnShutdown(batchLinks)
 					return
@@ -948,7 +955,7 @@ workerLoop:
 							if dItems == nil {
 								dItems = []*T{drainEnv.item}
 							}
-							batchLinks, dFlushed, exit = b.appendItems(dItems, batchLinks)
+							batchLinks, dFlushed, exit = b.appendItems(dItems, batchLinks, ReasonDrain)
 							if exit {
 								b.drainOnShutdown(batchLinks)
 								return
@@ -990,7 +997,7 @@ workerLoop:
 			}
 
 			var flushedDuringAppend bool
-			batchLinks, flushedDuringAppend, exit = b.appendItems(items, batchLinks)
+			batchLinks, flushedDuringAppend, exit = b.appendItems(items, batchLinks, ReasonSize)
 			if exit {
 				b.drainOnShutdown(batchLinks)
 				return
@@ -1015,7 +1022,7 @@ workerLoop:
 							gItems = []*T{greedyEnv.item}
 						}
 						var gFlushed bool
-						batchLinks, gFlushed, exit = b.appendItems(gItems, batchLinks)
+						batchLinks, gFlushed, exit = b.appendItems(gItems, batchLinks, ReasonSize)
 						flushedDuringAppend = flushedDuringAppend || gFlushed
 						if exit {
 							b.drainOnShutdown(batchLinks)
@@ -1099,7 +1106,7 @@ workerLoop:
 					if items == nil {
 						items = []*T{env.item}
 					}
-					batchLinks, tFlushed, exit = b.appendItems(items, batchLinks)
+					batchLinks, tFlushed, exit = b.appendItems(items, batchLinks, ReasonManual)
 					if exit {
 						b.drainOnShutdown(batchLinks)
 						return
