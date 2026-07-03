@@ -10,32 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize covers the P0 where a
-// shutdown racing a full SetMaxConcurrent pool mid-split caused appendItems to
-// drop the unconsumed tail of an oversized PutBatch (Close() then returned
-// "success" having silently lost items), and the shutdown drain handed fn a
-// batch larger than the configured size.
-//
-// The single persistent pool worker is occupied by a "prime" batch that blocks
-// in fn, so when the main worker splits the oversized PutBatch it blocks
-// sending the first chunk over the rendezvous channel. Close() then wins the
-// race, forcing the exit=true path. Every accepted item must still reach fn,
-// and no batch may exceed the configured size on any path.
-func TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize(t *testing.T) { //nolint:gocognit // Sequential race-orchestration with guarded fn recording; splitting would obscure the ordering under test
-	const size = 2
-	const groupN = 6 // three size-2 chunks
+// runShutdownRaceScenario drives the shutdown-race exit path shared by the two
+// tests below: it primes the full SetMaxConcurrent pool with a batch that
+// blocks in fn, enqueues an oversized PutBatch that blocks mid-split on the
+// busy pool, then calls Close() concurrently so flushBatch takes its
+// shutdown-race (exit=true) branch. The batcher is fully created AND closed
+// within this call. onBatch is invoked for every non-prime batch handed to fn.
+// The prime batch carries negative values; group items are 0..groupN-1.
+func runShutdownRaceScenario(t *testing.T, size, poolN, groupN int, onBatch func(batch []*int)) {
+	t.Helper()
 
 	primeStarted := make(chan struct{})
 	releasePrime := make(chan struct{})
 	var primeOnce sync.Once
 
-	var mu sync.Mutex
-	var delivered []int
-	maxBatch := 0
-
 	b := New[int](size, time.Hour, func(batch []*int) {
-		// The prime batch carries negative values and blocks to occupy the
-		// sole pool worker; it is not recorded.
 		prime := false
 		for _, v := range batch {
 			if *v < 0 {
@@ -47,25 +36,19 @@ func TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize(t *testing.T) { //no
 			<-releasePrime
 			return
 		}
-		mu.Lock()
-		if len(batch) > maxBatch {
-			maxBatch = len(batch)
-		}
-		for _, v := range batch {
-			delivered = append(delivered, *v)
-		}
-		mu.Unlock()
+		onBatch(batch)
 	}, true)
-	b.SetMaxConcurrent(1)
+	b.SetMaxConcurrent(poolN)
 
-	// Prime a full size-2 batch so the single pool worker is busy in fn.
-	n1, n2 := -1, -2
-	b.Put(&n1)
-	b.Put(&n2)
+	// Prime a full batch so every pool worker is busy in fn.
+	for i := 0; i < size; i++ {
+		v := -(i + 1)
+		b.Put(&v)
+	}
 	<-primeStarted
 
-	// Oversized group: the worker pulls it, appends chunk one, and blocks
-	// sending that chunk to the busy pool worker.
+	// Oversized group: the worker pulls it, appends the first chunk, and blocks
+	// sending that chunk to the busy pool.
 	items := make([]*int, groupN)
 	for i := range items {
 		v := i
@@ -87,6 +70,31 @@ func TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize(t *testing.T) { //no
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close() did not return")
 	}
+}
+
+// TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize covers the P0 where a
+// shutdown racing a full SetMaxConcurrent pool mid-split caused appendItems to
+// drop the unconsumed tail of an oversized PutBatch (Close() then returned
+// "success" having silently lost items), and the shutdown drain handed fn a
+// batch larger than the configured size. Every accepted item must still reach
+// fn, and no batch may exceed the configured size on any path.
+func TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize(t *testing.T) {
+	const size = 2
+
+	var mu sync.Mutex
+	var delivered []int
+	maxBatch := 0
+
+	runShutdownRaceScenario(t, size, 1, 6, func(batch []*int) {
+		mu.Lock()
+		if len(batch) > maxBatch {
+			maxBatch = len(batch)
+		}
+		for _, v := range batch {
+			delivered = append(delivered, *v)
+		}
+		mu.Unlock()
+	})
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -101,56 +109,10 @@ func TestPutBatch_ShutdownRaceDeliversAllItemsAndHonorsSize(t *testing.T) { //no
 // when flushBatch took the exit=true shutdown-race branch the worker returned
 // without closing workCh, so the persistent pool goroutines blocked forever on
 // range workCh. After Close returns, goroutine count must settle back.
-func TestSetMaxConcurrent_NoWorkerLeakOnShutdownRace(t *testing.T) { //nolint:gocognit // Sequential race-orchestration setup; each step is a single guarded action
-	const size = 2
-	const poolN = 1 // a full pool, so the split blocks and the shutdown-race exit path is taken
-
+func TestSetMaxConcurrent_NoWorkerLeakOnShutdownRace(t *testing.T) {
 	before := runtime.NumGoroutine()
 
-	primeStarted := make(chan struct{})
-	releasePrime := make(chan struct{})
-	var primeOnce sync.Once
-
-	b := New[int](size, time.Hour, func(batch []*int) {
-		prime := false
-		for _, v := range batch {
-			if *v < 0 {
-				prime = true
-			}
-		}
-		if prime {
-			primeOnce.Do(func() { close(primeStarted) })
-			<-releasePrime
-		}
-	}, true)
-	b.SetMaxConcurrent(poolN)
-
-	n1, n2 := -1, -2
-	b.Put(&n1)
-	b.Put(&n2)
-	<-primeStarted
-
-	items := make([]*int, 6)
-	for i := range items {
-		v := i
-		items[i] = &v
-	}
-	b.PutBatch(items)
-	time.Sleep(100 * time.Millisecond)
-
-	closed := make(chan struct{})
-	go func() {
-		b.Close()
-		close(closed)
-	}()
-	time.Sleep(50 * time.Millisecond)
-	close(releasePrime)
-
-	select {
-	case <-closed:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Close() did not return")
-	}
+	runShutdownRaceScenario(t, 2, 1, 6, func(_ []*int) {})
 
 	// Poll with a plain loop rather than require.Eventually: Eventually runs its
 	// condition on a testify-spawned goroutine, which would itself inflate the

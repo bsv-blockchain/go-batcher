@@ -143,6 +143,28 @@ func TestPrometheusMetricsRecordsBatcherActivity(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
+// TestPrometheusMetricsPutBatchCountsItems verifies enqueued_total counts every
+// item of a PutBatch group, not one per multi-item envelope — the counter's
+// help text is "Total items submitted to the batcher".
+func TestPrometheusMetricsPutBatchCountsItems(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewPrometheusMetrics(reg, "test", "batch")
+
+	b := New[int](100, time.Hour, func(_ []*int) {}, true, WithName("alpha"), WithMetrics(m))
+	defer b.Close()
+
+	items := make([]*int, 7)
+	for i := range items {
+		v := i
+		items[i] = &v
+	}
+	b.PutBatch(items)
+
+	require.Eventually(t, func() bool {
+		return counterValue(t, reg, "test_batch_enqueued_total", "batcher", "alpha") == 7
+	}, time.Second, 10*time.Millisecond, "PutBatch of 7 items must increment enqueued_total by 7")
+}
+
 func TestPrometheusMetricsSharedAcrossBatchers(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewPrometheusMetrics(reg, "svc", "batcher")

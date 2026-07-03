@@ -336,8 +336,13 @@ func (b *Batcher[T]) PutCtx(ctx context.Context, item *T, _ ...int) {
 // The group is treated as an ordered unit by the collector: if it is smaller
 // than the configured batch size it simply accumulates like N individual
 // Put calls; if appending it would exceed the size cap, the collector splits
-// it into full-size batches (each dispatched immediately, in order) plus at
-// most one trailing partial batch that continues accumulating normally.
+// it into full-size batches (each handed to fn in order) plus at most one
+// trailing partial batch that continues accumulating normally. Item order is
+// preserved across the split. Note that "in order" refers to dispatch order:
+// with background=true (and especially without SetMaxConcurrent) each split
+// batch runs fn on its own goroutine, so cross-batch fn completion order is
+// not guaranteed — only item order within a batch, and the order in which
+// batches are handed off, are.
 // Batch size is always honored — a PutBatch call never produces a batch
 // larger than the batcher's configured size, even when len(items) > size.
 //
@@ -397,7 +402,15 @@ func (b *Batcher[T]) PutBatchCtx(ctx context.Context, items []*T, _ ...int) {
 // fallback when the buffer is full so the common case is allocation- and
 // timer-free.
 func (b *Batcher[T]) enqueue(env itemEnvelope[T]) {
-	b.cfg.metricsBound.Enqueued()
+	// enqueued_total counts items submitted, so a PutBatch envelope accounts
+	// for its whole group — not one per channel send — to avoid undercounting.
+	if n := len(env.items); n > 0 {
+		for i := 0; i < n; i++ {
+			b.cfg.metricsBound.Enqueued()
+		}
+	} else {
+		b.cfg.metricsBound.Enqueued()
+	}
 	select {
 	case b.ch <- env:
 		return
