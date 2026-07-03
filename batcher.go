@@ -176,6 +176,11 @@ type Batcher[T any] struct {
 	// closeOnce guards close(done) so Close is idempotent — a second call must
 	// not panic with "close of closed channel".
 	closeOnce sync.Once
+	// modeMu serializes the mutually-exclusive mode setters (SetDrainMode,
+	// SetGreedyAccumulate, SetTickInterval) so their check-then-set on the
+	// independent mode atomics is linearizable — concurrent calls can no longer
+	// interleave two checks before either store and leave conflicting modes on.
+	modeMu sync.Mutex
 }
 
 // New creates a new Batcher instance with the specified configuration.
@@ -205,6 +210,9 @@ type Batcher[T any] struct {
 //   - The batch slice is pre-allocated with the specified size for efficiency
 //   - Passing background=true is recommended for I/O-bound operations to avoid blocking
 func New[T any](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *Batcher[T] {
+	if size <= 0 {
+		panic("batcher: size must be greater than 0")
+	}
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -243,6 +251,9 @@ func New[T any](size int, timeout time.Duration, fn func(batch []*T), background
 // Returns:
 //   - *Batcher[T]: A configured and running Batcher instance with pooling enabled
 func NewWithPool[T any](size int, timeout time.Duration, fn func(batch []*T), background bool, opts ...Option) *Batcher[T] {
+	if size <= 0 {
+		panic("batcher: size must be greater than 0")
+	}
 	b := &Batcher[T]{
 		fn:         fn,
 		size:       size,
@@ -334,6 +345,19 @@ func (b *Batcher[T]) PutCtx(ctx context.Context, item *T, _ ...int) {
 // you want linked to the eventual batch span(s). Passing a nil or empty
 // slice is a no-op.
 //
+// PutBatch snapshots the slice: the pointers are copied into an internal
+// buffer before the call returns, so the caller is free to reuse, pool, or
+// overwrite the slice immediately afterward. The pointed-to items themselves
+// are shared, exactly as with Put — do not mutate an item after enqueuing it.
+//
+// A group larger than the batch size is split and dispatched by the single
+// worker goroutine as ceil(len(items)/size) batches. That work is done in one
+// pass: with background=true it is spread across the dispatch pool, but with
+// background=false each split batch runs fn inline on the worker, so a single
+// very large PutBatch can keep the worker (and therefore Trigger/timeouts)
+// busy for len(items)/size × fn-duration. Prefer sizes that keep any one call
+// bounded, or use background dispatch, for very large groups.
+//
 // Parameters:
 //   - items: The group of items to enqueue together. Must not contain nil pointers.
 //   - _: Variadic int parameter for payload size (ignored, kept for API compatibility)
@@ -341,7 +365,12 @@ func (b *Batcher[T]) PutBatch(items []*T, _ ...int) {
 	if len(items) == 0 {
 		return
 	}
-	b.enqueue(itemEnvelope[T]{items: items})
+	// Snapshot the caller's slice: the worker reads it later on its own
+	// goroutine, so retaining the caller's backing array would race a caller
+	// that reuses or pools the slice after this call returns.
+	snapshot := make([]*T, len(items))
+	copy(snapshot, items)
+	b.enqueue(itemEnvelope[T]{items: snapshot})
 }
 
 // PutBatchCtx is like PutBatch but captures the SpanContext from ctx so the
@@ -354,8 +383,11 @@ func (b *Batcher[T]) PutBatchCtx(ctx context.Context, items []*T, _ ...int) {
 	if len(items) == 0 {
 		return
 	}
+	// See PutBatch: snapshot so the caller may reuse the slice after the call.
+	snapshot := make([]*T, len(items))
+	copy(snapshot, items)
 	b.enqueue(itemEnvelope[T]{
-		items: items,
+		items: snapshot,
 		sc:    trace.SpanContextFromContext(ctx),
 	})
 }
@@ -427,9 +459,10 @@ func (b *Batcher[T]) Trigger() {
 //   - Close is idempotent: calling it more than once is safe and will not panic.
 //     Concurrent callers all block until shutdown completes.
 //
-// IMPORTANT: Do not call Put() / PutCtx() after Close() has been called. The
-// channel is closed during shutdown, and any further send will panic with
-// "send on closed channel". Callers must ensure proper synchronization.
+// IMPORTANT: Do not call Put() / PutCtx() / PutBatch() / PutBatchCtx() after
+// Close() has been called. The channel is closed during shutdown, and any
+// further send will panic with "send on closed channel". Callers must ensure
+// proper synchronization.
 func (b *Batcher[T]) Close() {
 	b.closeOnce.Do(func() {
 		close(b.done)
@@ -451,6 +484,8 @@ func (b *Batcher[T]) Close() {
 // at low throughput, batches are small (even single-item) with near-zero latency;
 // at high throughput, batches grow larger as more items queue during processing.
 func (b *Batcher[T]) SetDrainMode(enabled bool) {
+	b.modeMu.Lock()
+	defer b.modeMu.Unlock()
 	if enabled && b.ticker.Load() != nil {
 		b.cfg.logger.Warnf("batcher %q: SetDrainMode(true) rejected — tick mode is enabled", b.cfg.name)
 		return
@@ -481,6 +516,8 @@ func (b *Batcher[T]) SetDrainMode(enabled bool) {
 // though changing it once items are already flowing does not retroactively
 // affect an in-progress accumulation cycle.
 func (b *Batcher[T]) SetGreedyAccumulate(enabled bool) {
+	b.modeMu.Lock()
+	defer b.modeMu.Unlock()
 	if enabled && b.drainMode.Load() {
 		b.cfg.logger.Warnf("batcher %q: SetGreedyAccumulate(true) rejected — drain mode is enabled", b.cfg.name)
 		return
@@ -549,6 +586,8 @@ func (b *Batcher[T]) SetTickInterval(d time.Duration) {
 	if d <= 0 {
 		return
 	}
+	b.modeMu.Lock()
+	defer b.modeMu.Unlock()
 	if b.drainMode.Load() {
 		b.cfg.logger.Warnf("batcher %q: SetTickInterval rejected — drain mode is enabled", b.cfg.name)
 		return
@@ -613,6 +652,10 @@ func (b *Batcher[T]) flushBatch(reason string, batchLinks []trace.Link) (newBatc
 					b.pool.Put(&slice)
 				}
 				b.inflight.Done()
+				// This batch has been dispatched; clear b.batch so the caller
+				// (appendItems) can preserve any not-yet-appended remainder of
+				// an oversized PutBatch without re-dispatching these items.
+				b.batch = nil
 				return nil, true
 			}
 		} else if b.usePool {
@@ -687,6 +730,10 @@ func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link) (newBatchL
 			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
 			flushed = true
 			if exit {
+				// flushBatch cleared b.batch on the shutdown-race path; keep the
+				// not-yet-appended remainder so the shutdown drain still delivers
+				// it instead of silently dropping it.
+				b.batch = append(b.batch, items...)
 				return batchLinks, flushed, true
 			}
 			room = b.size
@@ -704,12 +751,73 @@ func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link) (newBatchL
 			batchLinks, exit = b.flushBatch(ReasonSize, batchLinks)
 			flushed = true
 			if exit {
+				b.batch = append(b.batch, items...)
 				return batchLinks, flushed, true
+			}
+			// Interruption point: once shutdown has begun, stop splitting a
+			// large group synchronously here and hand the remainder to the
+			// shutdown drain, so a single oversized PutBatch cannot keep the
+			// worker from acknowledging Close for len(items)/size flushes.
+			select {
+			case <-b.done:
+				b.batch = append(b.batch, items...)
+				return batchLinks, flushed, true
+			default:
 			}
 		}
 	}
 
 	return batchLinks, flushed, false
+}
+
+// drainOnShutdown is the single terminal path taken whenever the worker stops.
+// It is called with b.done already closed, so no further live dispatching can
+// happen. It closes b.ch, drains any envelopes still buffered there into
+// b.batch, then dispatches everything held — the residual partial batch plus
+// the drained remainder — synchronously and in size-capped chunks so a queued
+// PutBatch envelope (or any accumulated batch) never hands fn more than the
+// configured size on the shutdown path either. Finally it closes the
+// persistent worker pool so its goroutines exit.
+//
+// It must be called exactly once, immediately before worker() returns, on every
+// exit path — including the flushBatch/appendItems exit=true (shutdown-race)
+// paths, which previously returned directly and leaked the pool goroutines by
+// never closing workCh.
+func (b *Batcher[T]) drainOnShutdown(batchLinks []trace.Link) { //nolint:gocognit // Terminal drain: close, drain, size-capped dispatch, pool close — each a single guarded step on the one shutdown path
+	close(b.ch)
+	for env := range b.ch {
+		if env.items != nil {
+			b.batch = append(b.batch, env.items...)
+		} else {
+			b.batch = append(b.batch, env.item)
+		}
+		if env.sc.IsValid() {
+			batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
+		}
+	}
+
+	if len(b.batch) > 0 {
+		b.cfg.logger.Infof("batcher %q: draining %d items on shutdown", b.cfg.name, len(b.batch))
+	}
+	// Dispatch synchronously in chunks of at most b.size. Because each dispatch
+	// is synchronous, fn has returned before we advance b.batch, so reslicing
+	// the backing array is safe and no inflight tracking is needed.
+	for len(b.batch) > 0 {
+		n := b.size
+		if n > len(b.batch) {
+			n = len(b.batch)
+		}
+		b.dispatchAndRecord(b.batch[:n:n], batchLinks, ReasonShutdown)
+		b.batch = b.batch[n:]
+		batchLinks = nil // the span link travels with the first chunk only
+	}
+
+	// We are the sole sender to workCh; closing here lets the persistent
+	// dispatch goroutines drain any in-flight batch and exit cleanly. No-op
+	// when SetMaxConcurrent was not configured.
+	if b.workCh != nil {
+		close(b.workCh)
+	}
 }
 
 // worker is the core processing loop that manages batch aggregation and processing.
@@ -774,33 +882,9 @@ workerLoop:
 	for {
 		select {
 		case <-b.done:
-			// Shutdown: drain channel and process remaining items. This
-			// residual dispatch already ignores the size cap for ordinary
-			// single-item accumulation (it flushes whatever piled up between
-			// the done-signal and the channel fully draining), so a PutBatch
-			// envelope's items are simply appended in full here too — no
-			// splitting needed to match existing behavior.
-			close(b.ch)
-			for env := range b.ch {
-				if env.items != nil {
-					b.batch = append(b.batch, env.items...)
-				} else {
-					b.batch = append(b.batch, env.item)
-				}
-				if env.sc.IsValid() {
-					batchLinks = append(batchLinks, trace.Link{SpanContext: env.sc})
-				}
-			}
-			if len(b.batch) > 0 {
-				b.cfg.logger.Infof("batcher %q: draining %d items on shutdown", b.cfg.name, len(b.batch))
-				b.dispatchAndRecord(b.batch, batchLinks, ReasonShutdown)
-			}
-			// We are the sole sender to workCh; closing here lets the
-			// persistent dispatch goroutines drain any in-flight batch and
-			// exit cleanly. No-op when SetMaxConcurrent was not configured.
-			if b.workCh != nil {
-				close(b.workCh)
-			}
+			// Shutdown: drain the channel and dispatch every remaining item,
+			// size-capped, then close the pool. See drainOnShutdown.
+			b.drainOnShutdown(batchLinks)
 			return
 
 		case env := <-b.ch:
@@ -819,44 +903,57 @@ workerLoop:
 			}
 
 			if b.drainMode.Load() { //nolint:nestif // Drain-then-fire loop with a nested non-blocking select; inherent to the drain-mode contract
-				// Drain all available items up to size cap, then fire
+				// Drain the already-queued items up to the size cap, then fire
 				// immediately. appendItems may itself flush mid-drain if a
-				// PutBatch envelope fills to size, which is fine: the outer
-				// `for len(b.batch) < b.size` condition below just keeps
-				// draining into the (now fresh) batch.
+				// PutBatch envelope fills to size.
 				items := env.items
 				if items == nil {
 					items = []*T{env.item}
 				}
-				batchLinks, _, exit = b.appendItems(items, batchLinks)
+				var dFlushed bool
+				batchLinks, dFlushed, exit = b.appendItems(items, batchLinks)
 				if exit {
+					b.drainOnShutdown(batchLinks)
 					return
 				}
 
-				for len(b.batch) < b.size {
-					select {
-					case drainEnv := <-b.ch:
-						if drainEnv.sc.IsValid() {
-							batchLinks = append(batchLinks, trace.Link{SpanContext: drainEnv.sc})
+				// Only chase more queued items if the initial envelope did not
+				// itself fill and dispatch a batch. This bounds the drain to at
+				// most one dispatched batch per outer-loop iteration, so b.done,
+				// the trigger and the timer are always serviced promptly — even
+				// under sustained load that keeps b.ch non-empty (previously the
+				// loop could spin here for seconds without returning to select).
+				if !dFlushed {
+				drainLoop:
+					for len(b.batch) < b.size {
+						select {
+						case drainEnv := <-b.ch:
+							if drainEnv.sc.IsValid() {
+								batchLinks = append(batchLinks, trace.Link{SpanContext: drainEnv.sc})
+							}
+							dItems := drainEnv.items
+							if dItems == nil {
+								dItems = []*T{drainEnv.item}
+							}
+							batchLinks, dFlushed, exit = b.appendItems(dItems, batchLinks)
+							if exit {
+								b.drainOnShutdown(batchLinks)
+								return
+							}
+							if dFlushed {
+								break drainLoop
+							}
+						default:
+							break drainLoop
 						}
-						items := drainEnv.items
-						if items == nil {
-							items = []*T{drainEnv.item}
-						}
-						batchLinks, _, exit = b.appendItems(items, batchLinks)
-						if exit {
-							return
-						}
-					default:
-						batchLinks, exit = b.flushBatch(ReasonDrain, batchLinks)
-						if exit {
-							return
-						}
-						continue workerLoop
 					}
 				}
+
+				// Fire whatever partial remains (drain mode fires immediately);
+				// a no-op if appendItems already dispatched everything.
 				batchLinks, exit = b.flushBatch(ReasonDrain, batchLinks)
 				if exit {
+					b.drainOnShutdown(batchLinks)
 					return
 				}
 				continue workerLoop
@@ -882,10 +979,11 @@ workerLoop:
 			var flushedDuringAppend bool
 			batchLinks, flushedDuringAppend, exit = b.appendItems(items, batchLinks)
 			if exit {
+				b.drainOnShutdown(batchLinks)
 				return
 			}
 
-			if b.greedyAccumulate.Load() {
+			if b.greedyAccumulate.Load() { //nolint:nestif // Greedy non-blocking drain with a mid-drain flush bound; inherent to the accumulate contract
 				// Opportunistically pull additional already-queued items into
 				// this same cycle without blocking and without firing early
 				// (unlike drain mode's `default` arm, this loop never flushes
@@ -907,7 +1005,16 @@ workerLoop:
 						batchLinks, gFlushed, exit = b.appendItems(gItems, batchLinks)
 						flushedDuringAppend = flushedDuringAppend || gFlushed
 						if exit {
+							b.drainOnShutdown(batchLinks)
 							return
+						}
+						if gFlushed {
+							// A full batch was dispatched mid-drain; this cycle
+							// is complete. Stop and return to the outer select so
+							// done/trigger/timer are serviced — greedy must not
+							// keep chasing a fresh cycle's items in one pass, which
+							// would starve the worker under sustained load.
+							break greedyDrain
 						}
 					default:
 						break greedyDrain
@@ -938,6 +1045,7 @@ workerLoop:
 			timerCh = nil
 			batchLinks, exit = b.flushBatch(ReasonTimeout, batchLinks)
 			if exit {
+				b.drainOnShutdown(batchLinks)
 				return
 			}
 
@@ -948,6 +1056,7 @@ workerLoop:
 			}
 			batchLinks, exit = b.flushBatch(ReasonTimeout, batchLinks)
 			if exit {
+				b.drainOnShutdown(batchLinks)
 				return
 			}
 
@@ -959,6 +1068,7 @@ workerLoop:
 			// Non-blocking drain: if Trigger() raced ahead of a buffered Put, pull
 			// any immediately-available items (up to the size cap) so they are
 			// included in this flush rather than stranded until the next tick.
+			var tFlushed bool
 		triggerDrain:
 			for len(b.batch) < b.size {
 				select {
@@ -976,9 +1086,17 @@ workerLoop:
 					if items == nil {
 						items = []*T{env.item}
 					}
-					batchLinks, _, exit = b.appendItems(items, batchLinks)
+					batchLinks, tFlushed, exit = b.appendItems(items, batchLinks)
 					if exit {
+						b.drainOnShutdown(batchLinks)
 						return
+					}
+					if tFlushed {
+						// A full batch was dispatched mid-drain; stop chasing new
+						// items so this Trigger cannot spin here under sustained
+						// load (mirrors the greedy/drain bound). The trailing
+						// partial is flushed below.
+						break triggerDrain
 					}
 				default:
 					break triggerDrain
@@ -986,6 +1104,7 @@ workerLoop:
 			}
 			batchLinks, exit = b.flushBatch(ReasonManual, batchLinks)
 			if exit {
+				b.drainOnShutdown(batchLinks)
 				return
 			}
 		}

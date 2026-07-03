@@ -104,6 +104,11 @@ func TestGreedyAccumulate_RejectedWhenDrainModeEnabled(t *testing.T) {
 	b.SetGreedyAccumulate(true)
 
 	require.Equal(t, int64(1), warnings.Load(), "expected a warning when enabling greedy accumulate with drain mode on")
+	// The warning alone is not enough — assert the rejected mode actually
+	// stayed off (a dropped `return` in the guard would still warn but leave
+	// both modes enabled, which this catches).
+	require.True(t, b.drainMode.Load(), "drain mode must remain enabled")
+	require.False(t, b.greedyAccumulate.Load(), "greedy accumulate must not have been enabled")
 }
 
 // TestGreedyAccumulate_DrainModeRejectedWhenGreedyEnabled verifies the
@@ -121,6 +126,22 @@ func TestGreedyAccumulate_DrainModeRejectedWhenGreedyEnabled(t *testing.T) {
 	b.SetDrainMode(true)
 
 	require.Equal(t, int64(1), warnings.Load(), "expected a warning when enabling drain mode with greedy accumulate on")
+	require.True(t, b.greedyAccumulate.Load(), "greedy accumulate must remain enabled")
+	require.False(t, b.drainMode.Load(), "drain mode must not have been enabled")
+
+	// Behavioral confirmation that drain mode is truly off: a sub-size Put must
+	// NOT fire immediately (drain would; greedy never fires early).
+	fired := make(chan struct{}, 1)
+	b2 := New[int](10, time.Hour, func(_ []*int) { fired <- struct{}{} }, false, WithGreedyAccumulate(true))
+	defer b2.Close()
+	b2.SetDrainMode(true) // rejected — greedy already on
+	v := 1
+	b2.Put(&v)
+	select {
+	case <-fired:
+		t.Fatal("a sub-size Put fired immediately — drain mode was wrongly enabled")
+	case <-time.After(50 * time.Millisecond):
+	}
 }
 
 // TestGreedyAccumulate_WithPutBatch verifies greedy accumulate composes with
@@ -161,15 +182,22 @@ func TestGreedyAccumulate_AllItemsDelivered(t *testing.T) {
 
 	var seen sync.Map
 	var count atomic.Int64
+	var dupFound atomic.Bool
 	allDone := make(chan struct{})
+	var allDoneOnce sync.Once
 
+	// Record membership inside fn but do NOT assert here: a require failing on
+	// a background dispatch goroutine calls runtime.Goexit, which would skip the
+	// completion signal below and turn a clear assertion failure into a slow,
+	// misleading top-level timeout. Assert on the test goroutine after draining.
 	b := New[int](size, 50*time.Millisecond, func(batch []*int) {
 		for _, v := range batch {
-			_, dup := seen.LoadOrStore(*v, true)
-			require.False(t, dup, "item %d observed more than once", *v)
+			if _, dup := seen.LoadOrStore(*v, true); dup {
+				dupFound.Store(true)
+			}
 		}
-		if count.Add(int64(len(batch))) == totalItems {
-			close(allDone)
+		if count.Add(int64(len(batch))) >= totalItems {
+			allDoneOnce.Do(func() { close(allDone) })
 		}
 	}, true, WithGreedyAccumulate(true))
 	defer b.Close()
@@ -184,6 +212,9 @@ func TestGreedyAccumulate_AllItemsDelivered(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatalf("expected all %d items delivered, got %d", totalItems, count.Load())
 	}
+
+	require.False(t, dupFound.Load(), "no item should be observed more than once")
+	require.Equal(t, int64(totalItems), count.Load(), "exactly %d items should be delivered", totalItems)
 }
 
 // countingLogger is a minimal Logger that counts Warnf calls, used to assert
