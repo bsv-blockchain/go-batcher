@@ -242,7 +242,8 @@ func newTestSetup(t *testing.T, size int, timeout time.Duration, fn func([]*int)
 	mm := &mockMetrics{bound: bm}
 	tr := &recordingTracer{}
 	lg := &mockLogger{}
-	b := New(size, timeout, fn, background,
+	b := New(
+		size, timeout, fn, background,
 		WithName("testbatcher"),
 		WithMetrics(mm),
 		WithTracer(tr),
