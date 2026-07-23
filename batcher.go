@@ -740,7 +740,7 @@ func (b *Batcher[T]) flushBatch(reason string, batchLinks []trace.Link) (newBatc
 // If flushBatch reports exit=true (shutdown raced a full worker pool), this
 // stops immediately and propagates it — mirroring the original single-item
 // saveBatch behavior of returning from worker() at that point.
-func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link, reason string) (newBatchLinks []trace.Link, flushed bool, exit bool) { //nolint:gocognit // Split-at-cap loop with an early-exit propagation path; each branch is a single guarded step
+func (b *Batcher[T]) appendItems(items []*T, batchLinks []trace.Link, reason string) (newBatchLinks []trace.Link, flushed, exit bool) { //nolint:gocognit // Split-at-cap loop with an early-exit propagation path; each branch is a single guarded step
 	for len(items) > 0 {
 		room := b.size - len(b.batch)
 		if room <= 0 {
