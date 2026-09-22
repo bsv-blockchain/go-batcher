@@ -327,43 +327,54 @@ func TestTimePartitionedMap(t *testing.T) { //nolint:gocognit,gocyclo // Compreh
 	})
 
 	t.Run("Multiple buckets with same key", func(t *testing.T) {
-		// Create a map with multiple small buckets
+		// The map deduplicates globally: Set rejects a key that still exists in
+		// any live bucket, so the same key can never occupy two buckets at once.
+		// What a later Set records depends entirely on whether the earlier entry
+		// has expired. This test verifies that a duplicate Set while the key is
+		// live is rejected, and that once the entry expires the key can be
+		// re-added with a new value.
+		//
+		// Expiry and bucket bookkeeping are driven by background goroutines
+		// (cleanup on a timer, plus a periodic current-bucket-id refresh); reads
+		// never evict. Anything that depends on those goroutines is therefore
+		// asserted with require.Eventually rather than a fixed time.Sleep: on a
+		// loaded CI runner the goroutines can lag, and a single-shot assertion on
+		// the exact instant they happen to have run is a coin flip (which is what
+		// made this test flaky).
 		bucketDuration := 100 * time.Millisecond
 		m := NewTimePartitionedMap[int, string](bucketDuration, 3)
 
-		// Add key to first bucket
-		m.Set(1, "bucket1")
-
-		// Wait for time to move to the second bucket
-		time.Sleep(bucketDuration * 2) // Sleep for 2x bucket duration
-
-		// Add same key to second bucket
-		m.Set(1, "bucket2")
-
-		// Wait for time to move to the third bucket
-		time.Sleep(bucketDuration * 2) // Sleep for 2x bucket duration
-
-		// Add same key to third bucket
-		m.Set(1, "bucket3")
-
-		// Get should return the value from the most recent bucket
+		// While the key is live, a duplicate Set is rejected regardless of timing
+		// and the stored value stays "bucket1". Both checks are deterministic: the
+		// entry cannot be evicted this soon after insertion.
+		require.True(t, m.Set(1, "bucket1"), "initial set should succeed")
+		require.False(t, m.Set(1, "bucket2"), "duplicate set within the window should be rejected")
 		val, exists := m.Get(1)
-		if !exists {
-			t.Errorf("Expected key 1 to exist in the map")
-		}
+		require.True(t, exists, "expected key 1 to exist in the map")
+		require.Equal(t, "bucket1", val, "value should be unchanged while the key is still live")
 
-		if val != "bucket3" {
-			t.Errorf("Expected value 'bucket3', got '%s'", val)
-		}
+		// Wait for the background cleanup to actually evict the entry. Count() is
+		// decremented directly by cleanupOldBuckets, so it is a reliable signal
+		// that the eviction has happened.
+		require.Eventually(t, func() bool {
+			return m.Count() == 0
+		}, 5*time.Second, 10*time.Millisecond, "cleanup should eventually evict the expired entry")
 
-		// Delete the key
+		// With the old entry gone, re-adding the key must take and read back as
+		// the new value. Poll instead of asserting once: under load a freshly
+		// re-added entry can be briefly re-evicted (the cached current-bucket id
+		// may still point at an already-expired bucket) until the id refresh
+		// catches up, after which the value sticks.
+		require.Eventually(t, func() bool {
+			m.Set(1, "bucket3")
+			v, ok := m.Get(1)
+			return ok && v == "bucket3"
+		}, 5*time.Second, 20*time.Millisecond, "re-added value should eventually read back as bucket3")
+
+		// Delete the key; it should no longer exist.
 		m.Delete(1)
-
-		// Key should no longer exist
 		_, exists = m.Get(1)
-		if exists {
-			t.Errorf("Expected key 1 to be deleted from the map")
-		}
+		require.False(t, exists, "expected key 1 to be deleted from the map")
 	})
 
 	t.Run("Expired buckets cleanup", func(t *testing.T) {
