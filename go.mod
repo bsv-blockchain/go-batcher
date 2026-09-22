@@ -3,7 +3,7 @@ module github.com/bsv-blockchain/go-batcher/v2
 go 1.26.0
 
 require (
-	github.com/bsv-blockchain/go-tx-map v1.4.1
+	github.com/bsv-blockchain/go-tx-map v1.5.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.3
 	github.com/stretchr/testify v1.12.1
@@ -14,7 +14,7 @@ require (
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bsv-blockchain/go-bt/v2 v2.6.9 // indirect
+	github.com/bsv-blockchain/go-bt/v2 v2.7.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dolthub/maphash v0.1.0 // indirect
 	github.com/dolthub/swiss v0.2.1 // indirect
