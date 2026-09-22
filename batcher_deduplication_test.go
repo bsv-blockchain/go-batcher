@@ -327,43 +327,52 @@ func TestTimePartitionedMap(t *testing.T) { //nolint:gocognit,gocyclo // Compreh
 	})
 
 	t.Run("Multiple buckets with same key", func(t *testing.T) {
-		// Create a map with multiple small buckets
+		// The map deduplicates globally: Set rejects a key that still exists in
+		// any live bucket, so the same key can never occupy two buckets at once.
+		// The value a later Set records therefore depends entirely on whether the
+		// earlier entry has already expired. This test exercises that: a duplicate
+		// Set while the key is still live is rejected, but once the retention
+		// window has fully elapsed the key can be re-added with a new value.
+		//
+		// Timing must leave generous margins on both sides. Bucket IDs are floored
+		// to bucketDuration boundaries, so a bucket's real lifetime ranges from
+		// ~(retention - bucketDuration) to ~(retention + bucketDuration). Asserting
+		// on the boundary (as a bucketDuration*2 sleep against a 3*bucketDuration
+		// retention window did) is a coin flip on loaded CI runners.
 		bucketDuration := 100 * time.Millisecond
+		retention := bucketDuration * 3
 		m := NewTimePartitionedMap[int, string](bucketDuration, 3)
 
-		// Add key to first bucket
-		m.Set(1, "bucket1")
+		// Add key to the first bucket.
+		require.True(t, m.Set(1, "bucket1"), "initial set should succeed")
 
-		// Wait for time to move to the second bucket
-		time.Sleep(bucketDuration * 2) // Sleep for 2x bucket duration
+		// Move into a later bucket while staying well inside the retention window
+		// so bucket1 is guaranteed to still be live.
+		time.Sleep(bucketDuration)
 
-		// Add same key to second bucket
-		m.Set(1, "bucket2")
-
-		// Wait for time to move to the third bucket
-		time.Sleep(bucketDuration * 2) // Sleep for 2x bucket duration
-
-		// Add same key to third bucket
-		m.Set(1, "bucket3")
-
-		// Get should return the value from the most recent bucket
+		// The key is still present, so the duplicate must be rejected and the
+		// stored value must remain "bucket1".
+		require.False(t, m.Set(1, "bucket2"), "duplicate set within the window should be rejected")
 		val, exists := m.Get(1)
-		if !exists {
-			t.Errorf("Expected key 1 to exist in the map")
-		}
+		require.True(t, exists, "expected key 1 to exist in the map")
+		require.Equal(t, "bucket1", val, "value should be unchanged while the key is still live")
 
-		if val != "bucket3" {
-			t.Errorf("Expected value 'bucket3', got '%s'", val)
-		}
+		// Wait well past the retention window (plus a full bucket of slack) so
+		// bucket1 is guaranteed to have expired.
+		time.Sleep(retention + bucketDuration*2)
 
-		// Delete the key
+		// With the old entry gone, the key can be re-added with a fresh value.
+		require.True(t, m.Set(1, "bucket3"), "set after expiry should succeed")
+		val, exists = m.Get(1)
+		require.True(t, exists, "expected key 1 to exist after re-adding")
+		require.Equal(t, "bucket3", val, "value should reflect the most recent set")
+
+		// Delete the key.
 		m.Delete(1)
 
-		// Key should no longer exist
+		// Key should no longer exist.
 		_, exists = m.Get(1)
-		if exists {
-			t.Errorf("Expected key 1 to be deleted from the map")
-		}
+		require.False(t, exists, "expected key 1 to be deleted from the map")
 	})
 
 	t.Run("Expired buckets cleanup", func(t *testing.T) {
