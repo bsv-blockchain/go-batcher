@@ -1,9 +1,9 @@
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
-github.com/bsv-blockchain/go-bt/v2 v2.7.2 h1:9nR3D6ZmRmx8CwI4SuWVS2d8botQdkCJ63AqMkH2g94=
-github.com/bsv-blockchain/go-bt/v2 v2.7.2/go.mod h1:6+EdHO2yz0InWrmFaOUK/vvHieMI+UCdn1VvRu0cURE=
-github.com/bsv-blockchain/go-tx-map v1.5.0 h1:5wTbktWmQ+Kgus5Phh4s/Z3UmnLov4ih2QkM7pkMuz4=
-github.com/bsv-blockchain/go-tx-map v1.5.0/go.mod h1:ZDojRIjPPIq8OHff3zO1k9JEc9a6D5h7vBN4qfZkOhU=
+github.com/bsv-blockchain/go-bt/v2 v2.7.4 h1:n2cv7uMXpCHB0so+acLoqbBo4Nk/G2IRq+IxHbyoRN8=
+github.com/bsv-blockchain/go-bt/v2 v2.7.4/go.mod h1:FpGySPAZ0c4dR4Cfal1LEWOCVN6daPQbGcqeQkXInqw=
+github.com/bsv-blockchain/go-tx-map v1.5.1 h1:cFvgwBNQ+51e+KGgF/tZLrEOyEknhHiNBmT965a7oec=
+github.com/bsv-blockchain/go-tx-map v1.5.1/go.mod h1:xvZA9R3b0dbCTPiKGI26/R34v3LzmZ+xUnJnXL6kDXo=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/dolthub/maphash v0.1.0 h1:bsQ7JsF4FkkWyrP3oCnFJgrCUAFbFf3kOl4L/QxPDyQ=
